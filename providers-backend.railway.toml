@@ -1,0 +1,33 @@
+[build]
+command = "npm run build"
+
+[deploy]
+startCommand = "npm start"
+
+[env]
+NODE_ENV = "production"
+PORT = "3001"
+
+[httpService]
+internalPort = 3001
+forceHttps = true
+
+[httpService.headers]
+"X-Frame-Options" = "DENY"
+"X-Content-Type-Options" = "nosniff"
+"X-XSS-Protection" = "1; mode=block"
+"Referrer-Policy" = "strict-origin-when-cross-origin"
+"Permissions-Policy" = "camera=(), microphone=(), geolocation()"
+
+[envVars]
+# These will be set in Railway dashboard
+- name: "INTERNAL_API_KEY"
+  value = "5ef0ad5c74b1c1a361c289ae1f71aa5ce3bf90b06b3effd9fb9cd13d636c9163"
+- name: "REDIS_URL"
+  value = "your-upstash-redis-url"
+- name: "TMDB_API_KEY"
+  value = "your-tmdb-api-key"
+- name: "CORS_ORIGIN"
+  value = "https://your-main-backend.railway.app,http://localhost:3000"
+- name: "RAILWAY_PUBLIC_DOMAIN"
+  value = "your-providers-backend.railway.app"

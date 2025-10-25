@@ -1,0 +1,31 @@
+export declare const connectToRedis: () => Promise<any>;
+export declare const getRedisClient: () => any;
+export declare const disconnectFromRedis: () => Promise<void>;
+export declare const RedisKeys: {
+    readonly rooms: "room:";
+    readonly roomParticipants: "room:participants:";
+    readonly roomState: "room:state:";
+    readonly providerCache: "provider:";
+    readonly providerHealth: "provider:health:";
+    readonly proxyHealth: "proxy:health:";
+    readonly proxyStats: "proxy:stats:";
+    readonly rateLimit: "rate_limit:";
+    readonly sessions: "session:";
+    readonly cache: "cache:";
+};
+export declare const setRoom: (roomId: string, roomData: any) => Promise<void>;
+export declare const getRoom: (roomId: string) => Promise<any>;
+export declare const deleteRoom: (roomId: string) => Promise<void>;
+export declare const addRoomParticipant: (roomId: string, userId: string) => Promise<void>;
+export declare const removeRoomParticipant: (roomId: string, userId: string) => Promise<void>;
+export declare const getRoomParticipants: (roomId: string) => Promise<any>;
+export declare const setRoomState: (roomId: string, state: any) => Promise<void>;
+export declare const getRoomState: (roomId: string) => Promise<any>;
+export declare const setProviderCache: (provider: string, key: string, data: any, ttl?: number) => Promise<void>;
+export declare const getProviderCache: (provider: string, key: string) => Promise<any>;
+export declare const setProxyHealth: (proxyUrl: string, isHealthy: boolean) => Promise<void>;
+export declare const getProxyHealth: (proxyUrl: string) => Promise<boolean>;
+export declare const incrementRateLimit: (key: string, windowMs: number) => Promise<any>;
+export declare const getRateLimitCount: (key: string) => Promise<any>;
+export declare const cleanupExpiredKeys: () => Promise<void>;
+//# sourceMappingURL=redis.d.ts.map

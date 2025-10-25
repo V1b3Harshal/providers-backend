@@ -1,0 +1,25 @@
+export declare const validateEnvironment: () => void;
+export declare const PORT: number;
+export declare const NODE_ENV: string;
+export declare const INTERNAL_API_KEY: string;
+export declare const REDIS_URL: string;
+export declare const REDIS_PASSWORD: string | undefined;
+export declare const TMDB_API_URL: string;
+export declare const TMDB_API_KEY: string;
+export declare const TRAKT_API_URL: string;
+export declare const TRAKT_CLIENT_ID: string;
+export declare const TRAKT_CLIENT_SECRET: string;
+export declare const PROXY_URLS: string[];
+export declare const PROXY_ROTATION_INTERVAL: number;
+export declare const CORS_ORIGIN: string[];
+export declare const JWT_SECRET: string;
+export declare const JWT_EXPIRES_IN: string;
+export declare const RATE_LIMIT_MAX_REQUESTS: number;
+export declare const RATE_LIMIT_WINDOW_MS: number;
+export declare const WS_PORT: number;
+export declare const WS_MAX_CONNECTIONS: number;
+export declare const HEALTHCHECKS_IO_URL: string | undefined;
+export declare const LOG_LEVEL: string;
+export declare const LOG_FILE: string;
+export declare const getEnv: (key: string) => string | undefined;
+//# sourceMappingURL=environment.d.ts.map
