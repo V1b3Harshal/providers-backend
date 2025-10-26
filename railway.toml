@@ -11,5 +11,11 @@ PORT = "3001"
 # Force Railway to use npm instead of pnpm
 packageManager = "npm"
 
+# Override Railway's package manager detection
+buildCommand = "npm install && npm run build"
+
+# Prevent any pnpm detection
+installCommand = "npm install"
+
 [experimental]
 # Enable experimental features if needed
