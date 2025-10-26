@@ -1,9 +1,9 @@
 import { FastifyRequest, FastifyReply } from 'fastify';
 import { INTERNAL_API_KEY } from '../config/environment';
 
-export const internalAuth = async (request: FastifyRequest, reply: FastifyReply, done: () => void) => {
+export const internalAuth = (request: FastifyRequest, reply: FastifyReply, done: () => void) => {
   const apiKey = request.headers['x-internal-key'];
-  
+
   if (!apiKey) {
     reply.code(401).send({
       statusCode: 401,
@@ -12,7 +12,7 @@ export const internalAuth = async (request: FastifyRequest, reply: FastifyReply,
     });
     return;
   }
-  
+
   if (apiKey !== INTERNAL_API_KEY) {
     reply.code(401).send({
       statusCode: 401,
@@ -21,6 +21,6 @@ export const internalAuth = async (request: FastifyRequest, reply: FastifyReply,
     });
     return;
   }
-  
+
   done();
 };
