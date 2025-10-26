@@ -3,7 +3,6 @@
   "version": "1.0.0",
   "description": "Production-ready backend microservice for streaming provider management and watch-together functionality",
   "main": "dist/server.js",
-  "packageManager": "npm@10.0.0",
   "scripts": {
     "dev": "ts-node-dev --respawn --transpile-only src/server.ts",
     "build": "tsc",
