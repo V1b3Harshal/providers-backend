@@ -1,6 +1,5 @@
 # Dependencies
 node_modules/
-.pnpm-store/
 
 # Build outputs
 dist/
@@ -108,3 +107,8 @@ tmp/
 temp/
 *.tmp
 *.temp
+
+# Package manager lockfiles
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
