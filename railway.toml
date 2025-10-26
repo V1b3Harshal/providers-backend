@@ -8,5 +8,8 @@ startCommand = "npm start"
 NODE_ENV = "production"
 PORT = "3001"
 
+# Force Railway to use npm instead of pnpm
+packageManager = "npm"
+
 [experimental]
 # Enable experimental features if needed
