@@ -52,6 +52,7 @@ export interface WatchTogetherRoom {
   adminId: string;
   mediaId: string;
   mediaType: 'movie' | 'tv';
+  providerId?: string;
   participants: string[];
   currentState: PlaybackState;
   createdAt: Date;
@@ -63,10 +64,12 @@ export interface PlaybackState {
   currentTime: number;
   duration: number;
   playbackRate: number;
+  currentEpisode?: number;
+  providerUrl?: string;
 }
 
 export interface PlaybackAction {
-  type: 'play' | 'pause' | 'seek' | 'setPlaybackRate' | 'updateTime';
+  type: 'play' | 'pause' | 'seek' | 'setPlaybackRate' | 'updateTime' | 'changeEpisode' | 'changeProvider' | 'changeMedia';
   data: any;
 }
 
