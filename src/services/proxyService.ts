@@ -12,20 +12,23 @@ export class ProxyService {
   }
 
   private initializeProxies() {
-    // Load proxies from environment or use default list
-    const proxyUrls = process.env.PROXY_URLS?.split(',') || [
-      'http://proxy1.example.com:8080',
-      'http://proxy2.example.com:8080',
-      'http://proxy3.example.com:8080'
-    ];
+    // Load proxies from environment only - no default proxies
+    const proxyUrls = process.env.PROXY_URLS?.split(',').filter(url => url.trim() !== '') || [];
 
+    if (proxyUrls.length === 0) {
+      console.log('No proxies provided in PROXY_URLS environment variable - proxy rotation disabled');
+      this.proxies = [];
+      return;
+    }
+
+    console.log(`Initializing ${proxyUrls.length} proxies from environment`);
     this.proxies = proxyUrls.map((url, index) => ({
-      url,
+      url: url.trim(),
       enabled: true,
       lastUsed: new Date(Date.now() - index * 60000), // Stagger last used times
       requestCount: 0,
       successRate: 100,
-      healthCheckUrl: `${url}/health`
+      healthCheckUrl: `${url.trim()}/health`
     }));
 
     // Start proxy rotation
@@ -33,6 +36,12 @@ export class ProxyService {
   }
 
   async getProxy(): Promise<ProxyConfig | null> {
+    // If no proxies are configured, return null
+    if (this.proxies.length === 0) {
+      console.log('No proxies configured - returning null');
+      return null;
+    }
+
     // Find next available proxy
     const availableProxies = this.proxies.filter(p => p.enabled);
     if (availableProxies.length === 0) {
@@ -150,6 +159,12 @@ export class ProxyService {
   }
 
   private startProxyRotation(): void {
+    // Only start proxy rotation if proxies are configured
+    if (this.proxies.length === 0) {
+      console.log('No proxies configured - skipping proxy rotation setup');
+      return;
+    }
+
     const rotationInterval = parseInt(process.env.PROXY_ROTATION_INTERVAL || '300000'); // 5 minutes
     
     this.rotationInterval = setInterval(async () => {
