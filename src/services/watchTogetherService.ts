@@ -14,6 +14,8 @@ import {
 } from '../config/redis';
 import { v4 as uuidv4 } from 'uuid';
 import { logger } from '../utils/logger';
+import jwt from 'jsonwebtoken';
+import { JWT_SECRET } from '../config/environment';
 
 export class WatchTogetherService {
   private io: Server;
@@ -31,9 +33,31 @@ export class WatchTogetherService {
     this.io.on('connection', (socket: Socket) => {
       logger.info(`User connected: ${socket.id}`);
 
+      // Simplified WebSocket authentication
+      socket.on('authenticate', (data: { token: string }, callback: any) => {
+        try {
+          const decoded = jwt.verify(data.token, JWT_SECRET) as any;
+          socket.data.userId = decoded.userId;
+          socket.data.isAdmin = decoded.isAdmin || false;
+          logger.info(`User ${decoded.userId} authenticated for WebSocket`);
+          callback({ success: true, isAdmin: decoded.isAdmin || false });
+        } catch (error) {
+          logger.error('WebSocket authentication failed:', error);
+          callback({ success: false, error: 'Authentication failed' });
+        }
+      });
+
       socket.on('create_room', async (data, callback) => {
         try {
-          const { name, mediaId, mediaType, adminId, providerId } = data;
+          const { name, mediaId, mediaType, adminId, providerId, token } = data;
+          
+          // Verify JWT token
+          const decoded = jwt.verify(token, JWT_SECRET) as any;
+          if (decoded.userId !== adminId) {
+            callback({ success: false, error: 'User ID mismatch' });
+            return;
+          }
+
           const roomId = uuidv4();
           
           const room: WatchTogetherRoom = {
@@ -62,6 +86,7 @@ export class WatchTogetherService {
           socket.join(roomId);
           socket.data.roomId = roomId;
           socket.data.userId = adminId;
+          socket.data.isAdmin = true;
 
           this.io.to(roomId).emit('room_created', room);
           callback({ success: true, roomId, room });
@@ -73,8 +98,15 @@ export class WatchTogetherService {
 
       socket.on('join_room', async (data, callback) => {
         try {
-          const { roomId, userId } = data;
+          const { roomId, userId, token } = data;
           
+          // Verify JWT token
+          const decoded = jwt.verify(token, JWT_SECRET) as any;
+          if (decoded.userId !== userId) {
+            callback({ success: false, error: 'User ID mismatch' });
+            return;
+          }
+
           const room = await getRoom(roomId);
           if (!room) {
             callback({ success: false, error: 'Room not found' });
@@ -97,15 +129,21 @@ export class WatchTogetherService {
           socket.join(roomId);
           socket.data.roomId = roomId;
           socket.data.userId = userId;
+          socket.data.isAdmin = false;
 
           // Send current state to new user
           const currentState = await getRoomState(roomId);
           socket.emit('initial_state', {
             currentState: currentState || room.currentState,
-            participants: room.participants
+            participants: room.participants,
+            isAdmin: false
           });
 
-          this.io.to(roomId).emit('user_joined', { userId, participants: room.participants });
+          this.io.to(roomId).emit('user_joined', {
+            userId,
+            participants: room.participants,
+            isAdmin: false
+          });
           callback({ success: true, room });
         } catch (error) {
           logger.error('Error joining room:', error);
@@ -158,7 +196,7 @@ export class WatchTogetherService {
 
       socket.on('playback_action', async (data) => {
         try {
-          const { roomId, action, userId } = data;
+          const { roomId, action, userId, isAdmin } = data;
           
           const room = await getRoom(roomId);
           if (!room) {
@@ -166,9 +204,8 @@ export class WatchTogetherService {
             return;
           }
 
-          // Only admin can perform certain actions
-          const adminOnlyActions = ['changeMedia', 'changeProvider', 'changeEpisode'];
-          if (adminOnlyActions.includes(action.type) && room.adminId !== userId) {
+          // Check if user is authenticated and has permission
+          if (!isAdmin && room.adminId !== userId) {
             socket.emit('error', { message: 'Only admin can perform this action' });
             return;
           }
@@ -192,7 +229,7 @@ export class WatchTogetherService {
               break;
             case 'changeEpisode':
               stateUpdate.currentEpisode = action.data.episode || 1;
-              stateUpdate.currentTime = 0; // Reset time for new episode
+              stateUpdate.currentTime = 0;
               broadcastEvent = 'episode_changed';
               break;
             case 'changeProvider':
@@ -207,6 +244,17 @@ export class WatchTogetherService {
               stateUpdate.providerUrl = this.generateProviderUrl(room.providerId, action.data.mediaId);
               broadcastEvent = 'media_changed';
               break;
+            case 'fastForward':
+            case 'rewind':
+              const currentTime = room.currentState.currentTime || 0;
+              const skipAmount = action.data.skipAmount || 120;
+              const newTime = action.type === 'fastForward' ?
+                currentTime + skipAmount :
+                Math.max(0, currentTime - skipAmount);
+              
+              stateUpdate.currentTime = newTime;
+              broadcastEvent = 'time_skipped';
+              break;
           }
 
           room.currentState = { ...room.currentState, ...stateUpdate };
@@ -219,8 +267,12 @@ export class WatchTogetherService {
             action,
             state: room.currentState,
             userId,
-            timestamp: room.updatedAt
+            isAdmin: isAdmin || false,
+            timestamp: room.updatedAt,
+            roomId
           });
+
+          logger.info(`Admin ${userId} performed ${action.type} action in room ${roomId}`);
         } catch (error) {
           logger.error('Error handling playback action:', error);
         }
@@ -270,22 +322,22 @@ export class WatchTogetherService {
               await removeRoomParticipant(roomId, userId);
               room.participants = room.participants.filter((id: string) => id !== userId);
               
-              // If admin leaves, transfer admin to another participant
-              if (room.adminId === userId && room.participants.length > 0) {
-                const newAdmin = room.participants[0];
-                room.adminId = newAdmin;
+              // If admin leaves, end the session
+              if (room.adminId === userId) {
+                logger.info(`Admin ${userId} disconnected from room ${roomId}, ending session`);
                 
-                this.io.to(roomId).emit('admin_changed', {
-                  newAdmin,
-                  oldAdmin: userId,
-                  participants: room.participants
+                // Notify all participants that session is ending
+                this.io.to(roomId).emit('session_ended', {
+                  reason: 'admin_disconnected',
+                  timestamp: new Date(),
+                  endedBy: userId
                 });
-              }
-
-              if (room.participants.length === 0) {
+                
+                // Clean up room
                 await deleteRoom(roomId);
-                this.io.to(roomId).emit('room_deleted', { roomId });
+                await setRoomState(roomId, null);
               } else {
+                // If regular user leaves, notify remaining participants
                 this.io.to(roomId).emit('user_left', { userId, participants: room.participants });
               }
             }
@@ -294,6 +346,7 @@ export class WatchTogetherService {
           logger.error('Error handling disconnect:', error);
         }
       });
+
     });
   }
 
@@ -474,6 +527,113 @@ export class WatchTogetherService {
     await addRoomParticipant(roomId, roomData.adminId);
     
     return room;
+  }
+
+  async addUserToRoom(roomId: string, userId: string): Promise<void> {
+    await addRoomParticipant(roomId, userId);
+  }
+
+  async removeUserFromRoom(roomId: string, userId: string): Promise<void> {
+    await removeRoomParticipant(roomId, userId);
+  }
+
+  async skipTime(roomId: string, adminId: string, skipType: 'forward' | 'backward', skipAmount: number): Promise<void> {
+    const room = await getRoom(roomId);
+    if (!room) throw new Error('Room not found');
+
+    if (room.adminId !== adminId) {
+      throw new Error('Only admin can skip time');
+    }
+
+    const currentState = await getRoomState(roomId);
+    let newTime = currentState?.currentTime || 0;
+    
+    if (skipType === 'forward') {
+      newTime += skipAmount;
+    } else {
+      newTime = Math.max(0, newTime - skipAmount);
+    }
+
+    const updatedState = {
+      ...currentState,
+      currentTime: newTime,
+      updatedAt: new Date()
+    };
+
+    await setRoomState(roomId, updatedState);
+    await setRoom(roomId, {
+      ...room,
+      currentState: updatedState,
+      updatedAt: new Date()
+    });
+
+    this.io.to(roomId).emit('time_skipped', {
+      action: skipType,
+      amount: skipAmount,
+      newTime,
+      adminId,
+      timestamp: new Date()
+    });
+  }
+
+  async pausePlayback(roomId: string, adminId: string): Promise<void> {
+    const room = await getRoom(roomId);
+    if (!room) throw new Error('Room not found');
+
+    if (room.adminId !== adminId) {
+      throw new Error('Only admin can stop playback');
+    }
+
+    const currentState = await getRoomState(roomId);
+    const updatedState = {
+      ...currentState,
+      isPlaying: false,
+      updatedAt: new Date()
+    };
+
+    await setRoomState(roomId, updatedState);
+    await setRoom(roomId, {
+      ...room,
+      currentState: updatedState,
+      updatedAt: new Date()
+    });
+
+    this.io.to(roomId).emit('playback_paused', {
+      adminId,
+      timestamp: new Date(),
+      reason: 'admin_stopped_playback'
+    });
+  }
+
+  async endSession(roomId: string, adminId: string, reason?: string): Promise<void> {
+    const room = await getRoom(roomId);
+    if (!room) throw new Error('Room not found');
+
+    if (room.adminId !== adminId) {
+      throw new Error('Only admin can end session');
+    }
+
+    this.io.to(roomId).emit('session_ended', {
+      reason: reason || 'admin_ended_session',
+      timestamp: new Date(),
+      endedBy: adminId
+    });
+
+    await deleteRoom(roomId);
+    await setRoomState(roomId, null);
+  }
+
+  // Additional methods for enhanced admin control
+  async setRoom(roomId: string, room: WatchTogetherRoom): Promise<void> {
+    await setRoom(roomId, room);
+  }
+
+  async setRoomState(roomId: string, state: any): Promise<void> {
+    await setRoomState(roomId, state);
+  }
+
+  async deleteRoom(roomId: string): Promise<void> {
+    await deleteRoom(roomId);
   }
 }
 

@@ -1,6 +1,7 @@
 import axios from 'axios';
 import { ProxyConfig, ProxyHealthStatus } from '../types';
 import { getProxyHealth, setProxyHealth, getRedisClient, RedisKeys } from '../config/redis';
+import { PROXY_URLS, PROXY_ROTATION_INTERVAL } from '../config/environment';
 
 export class ProxyService {
   private proxies: ProxyConfig[] = [];
@@ -13,7 +14,7 @@ export class ProxyService {
 
   private initializeProxies() {
     // Load proxies from environment only - no default proxies
-    const proxyUrls = process.env.PROXY_URLS?.split(',').filter(url => url.trim() !== '') || [];
+    const proxyUrls = PROXY_URLS.filter(url => url.trim() !== '');
 
     if (proxyUrls.length === 0) {
       console.log('No proxies provided in PROXY_URLS environment variable - proxy rotation disabled');
@@ -165,7 +166,7 @@ export class ProxyService {
       return;
     }
 
-    const rotationInterval = parseInt(process.env.PROXY_ROTATION_INTERVAL || '300000'); // 5 minutes
+    const rotationInterval = PROXY_ROTATION_INTERVAL; // 5 minutes
     
     this.rotationInterval = setInterval(async () => {
       console.log('Performing proxy health check...');

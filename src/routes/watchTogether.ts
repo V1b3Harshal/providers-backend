@@ -1,11 +1,10 @@
-import { FastifyPluginAsync } from 'fastify';
+import { FastifyPluginAsync, FastifyRequest, FastifyReply } from 'fastify';
 import { watchTogetherService } from '../services/watchTogetherService';
 import { sanitizeRoomData, sanitizePlaybackAction, sanitizeUserId } from '../utils/sanitizer';
 import { createSafeErrorResponse, logErrorWithDetails } from '../utils/errorHandler';
 import { logger } from '../utils/logger';
 
 const watchTogetherRoutes: FastifyPluginAsync = async (fastify) => {
-  // Create a WebSocket server instance
   const io = (fastify as any).io;
   const wtService = watchTogetherService(io);
   // Create a new watch-together room
@@ -83,8 +82,8 @@ const watchTogetherRoutes: FastifyPluginAsync = async (fastify) => {
         });
       }
 
-      const room = await wtService.getRoom(roomData.name);
-      if (room) {
+      const existingRoom = await wtService.getAllRooms();
+      if (existingRoom.some(r => r.name === roomData.name)) {
         return reply.code(409 as any).send({
           statusCode: 409,
           error: 'Conflict',
@@ -217,14 +216,9 @@ const watchTogetherRoutes: FastifyPluginAsync = async (fastify) => {
         });
       }
 
-      // In a real implementation, you would add the user to the room here
-      // For now, we'll return the updated room
-      const updatedRoom = {
-        ...room,
-        participants: [...room.participants, sanitizedUserId],
-        updatedAt: new Date()
-      };
-
+      await wtService.addUserToRoom(roomId, sanitizedUserId);
+      
+      const updatedRoom = await wtService.getRoom(roomId);
       return { success: true, data: updatedRoom };
     } catch (error) {
       logErrorWithDetails(error, { 
@@ -323,7 +317,7 @@ const watchTogetherRoutes: FastifyPluginAsync = async (fastify) => {
         });
       }
 
-      // In a real implementation, you would remove the user from the room here
+      await wtService.removeUserFromRoom(roomId, sanitizedUserId);
       return { success: true };
     } catch (error) {
       logErrorWithDetails(error, { 
@@ -624,15 +618,15 @@ const watchTogetherRoutes: FastifyPluginAsync = async (fastify) => {
 
       const success = await wtService.transferAdmin(roomId, sanitizedCurrentAdmin, sanitizedNewAdmin);
       
-      if (success) {
-        return { success: true };
-      } else {
+      if (!success) {
         return reply.code(500 as any).send({
           statusCode: 500,
           error: 'Internal Server Error',
           message: 'Failed to transfer admin'
         });
       }
+      
+      return { success: true };
     } catch (error) {
       logErrorWithDetails(error, {
         context: 'Transfer admin',
@@ -750,15 +744,15 @@ const watchTogetherRoutes: FastifyPluginAsync = async (fastify) => {
 
       const success = await wtService.kickUser(roomId, sanitizedAdmin, sanitizedUserToKick);
       
-      if (success) {
-        return { success: true };
-      } else {
+      if (!success) {
         return reply.code(500 as any).send({
           statusCode: 500,
           error: 'Internal Server Error',
           message: 'Failed to kick user'
         });
       }
+      
+      return { success: true };
     } catch (error) {
       logErrorWithDetails(error, {
         context: 'Kick user',
@@ -770,47 +764,305 @@ const watchTogetherRoutes: FastifyPluginAsync = async (fastify) => {
     }
   });
 
-  // Get available providers
-  fastify.get('/providers', {
+
+  // Admin ends watch together session
+  fastify.post('/rooms/:roomId/end-session', {
     schema: {
+      params: {
+        type: 'object',
+        required: ['roomId'],
+        properties: {
+          roomId: { type: 'string', maxLength: 50 }
+        }
+      },
+      body: {
+        type: 'object',
+        required: ['adminId'],
+        properties: {
+          adminId: { type: 'string', maxLength: 50 },
+          reason: { type: 'string', maxLength: 100 }
+        }
+      },
       response: {
         200: {
           type: 'object',
-          required: ['success', 'data'],
+          required: ['success'],
           properties: {
-            success: { type: 'boolean' },
-            data: {
-              type: 'array',
-              items: {
-                type: 'object',
-                properties: {
-                  id: { type: 'string' },
-                  name: { type: 'string' },
-                  baseUrl: { type: 'string' },
-                  enabled: { type: 'boolean' }
-                }
-              }
-            }
+            success: { type: 'boolean' }
+          }
+        },
+        400: {
+          type: 'object',
+          required: ['statusCode', 'error', 'message'],
+          properties: {
+            statusCode: { type: 'number' },
+            error: { type: 'string' },
+            message: { type: 'string' }
+          }
+        },
+        403: {
+          type: 'object',
+          required: ['statusCode', 'error', 'message'],
+          properties: {
+            statusCode: { type: 'number' },
+            error: { type: 'string' },
+            message: { type: 'string' }
+          }
+        },
+        404: {
+          type: 'object',
+          required: ['statusCode', 'error', 'message'],
+          properties: {
+            statusCode: { type: 'number' },
+            error: { type: 'string' },
+            message: { type: 'string' }
           }
         }
       }
     }
   }, async (request, reply) => {
     try {
-      const providers = [
-        { id: 'vidnest', name: 'VidNest', baseUrl: 'https://vidnest.fun', enabled: true },
-        { id: 'vidsrc', name: 'VidSrc', baseUrl: 'https://vidsrc.to', enabled: true },
-        { id: 'embed', name: 'EmbedStream', baseUrl: 'https://embed.stream', enabled: true }
-      ];
+      const { roomId } = request.params as { roomId: string };
+      const { adminId, reason } = request.body as { adminId: string; reason?: string };
       
-      return { success: true, data: providers };
+      const sanitizedAdmin = sanitizeUserId(adminId);
+      if (!sanitizedAdmin) {
+        return reply.code(400).send({
+          statusCode: 400,
+          error: 'Bad Request',
+          message: 'Invalid admin ID'
+        });
+      }
+
+      const room = await wtService.getRoom(roomId);
+      if (!room) {
+        return reply.code(404).send({
+          statusCode: 404,
+          error: 'Not Found',
+          message: 'Room not found'
+        });
+      }
+
+      if (room.adminId !== sanitizedAdmin) {
+        return reply.code(403).send({
+          statusCode: 403,
+          error: 'Forbidden',
+          message: 'Only admin can end session'
+        });
+      }
+
+      await wtService.endSession(roomId, adminId, reason);
+      return { success: true };
     } catch (error) {
-      logErrorWithDetails(error, { context: 'Get providers' });
+      logErrorWithDetails(error, {
+        context: 'End watch together session',
+        roomId: (request.params as any).roomId
+      });
       
       const safeError = createSafeErrorResponse(error);
       return reply.code(safeError.statusCode as any).send(safeError);
     }
   });
+
+  // Admin skips forward/backward in playback
+  fastify.post('/rooms/:roomId/skip-time', {
+    schema: {
+      params: {
+        type: 'object',
+        required: ['roomId'],
+        properties: {
+          roomId: { type: 'string', maxLength: 50 }
+        }
+      },
+      body: {
+        type: 'object',
+        required: ['adminId', 'skipType', 'skipAmount'],
+        properties: {
+          adminId: { type: 'string', maxLength: 50 },
+          skipType: { type: 'string', enum: ['forward', 'backward'] },
+          skipAmount: { type: 'number', minimum: 1 }
+        }
+      },
+      response: {
+        200: {
+          type: 'object',
+          required: ['success'],
+          properties: {
+            success: { type: 'boolean' }
+          }
+        },
+        400: {
+          type: 'object',
+          required: ['statusCode', 'error', 'message'],
+          properties: {
+            statusCode: { type: 'number' },
+            error: { type: 'string' },
+            message: { type: 'string' }
+          }
+        },
+        403: {
+          type: 'object',
+          required: ['statusCode', 'error', 'message'],
+          properties: {
+            statusCode: { type: 'number' },
+            error: { type: 'string' },
+            message: { type: 'string' }
+          }
+        },
+        404: {
+          type: 'object',
+          required: ['statusCode', 'error', 'message'],
+          properties: {
+            statusCode: { type: 'number' },
+            error: { type: 'string' },
+            message: { type: 'string' }
+          }
+        }
+      }
+    }
+  }, async (request, reply) => {
+    try {
+      const { roomId } = request.params as { roomId: string };
+      const { adminId, skipType, skipAmount } = request.body as { adminId: string; skipType: 'forward' | 'backward'; skipAmount: number };
+      
+      const sanitizedAdmin = sanitizeUserId(adminId);
+      if (!sanitizedAdmin) {
+        return reply.code(400).send({
+          statusCode: 400,
+          error: 'Bad Request',
+          message: 'Invalid admin ID'
+        });
+      }
+
+      const room = await wtService.getRoom(roomId);
+      if (!room) {
+        return reply.code(404).send({
+          statusCode: 404,
+          error: 'Not Found',
+          message: 'Room not found'
+        });
+      }
+
+      if (room.adminId !== sanitizedAdmin) {
+        return reply.code(403).send({
+          statusCode: 403,
+          error: 'Forbidden',
+          message: 'Only admin can skip time'
+        });
+      }
+
+      await wtService.skipTime(roomId, adminId, skipType, skipAmount);
+      return { success: true };
+    } catch (error) {
+      logErrorWithDetails(error, {
+        context: 'Skip time in playback',
+        roomId: (request.params as any).roomId
+      });
+      
+      const safeError = createSafeErrorResponse(error);
+      return reply.code(safeError.statusCode as any).send(safeError);
+    }
+  });
+
+  // Admin stops playback for everyone
+  fastify.post('/rooms/:roomId/admin-stop-playback', {
+    schema: {
+      params: {
+        type: 'object',
+        required: ['roomId'],
+        properties: {
+          roomId: { type: 'string', maxLength: 50 }
+        }
+      },
+      body: {
+        type: 'object',
+        required: ['adminId'],
+        properties: {
+          adminId: { type: 'string', maxLength: 50 }
+        }
+      },
+      response: {
+        200: {
+          type: 'object',
+          required: ['success'],
+          properties: {
+            success: { type: 'boolean' }
+          }
+        },
+        400: {
+          type: 'object',
+          required: ['statusCode', 'error', 'message'],
+          properties: {
+            statusCode: { type: 'number' },
+            error: { type: 'string' },
+            message: { type: 'string' }
+          }
+        },
+        403: {
+          type: 'object',
+          required: ['statusCode', 'error', 'message'],
+          properties: {
+            statusCode: { type: 'number' },
+            error: { type: 'string' },
+            message: { type: 'string' }
+          }
+        },
+        404: {
+          type: 'object',
+          required: ['statusCode', 'error', 'message'],
+          properties: {
+            statusCode: { type: 'number' },
+            error: { type: 'string' },
+            message: { type: 'string' }
+          }
+        }
+      }
+    }
+  }, async (request, reply) => {
+    try {
+      const { roomId } = request.params as { roomId: string };
+      const { adminId } = request.body as { adminId: string };
+      
+      const sanitizedAdmin = sanitizeUserId(adminId);
+      if (!sanitizedAdmin) {
+        return reply.code(400).send({
+          statusCode: 400,
+          error: 'Bad Request',
+          message: 'Invalid admin ID'
+        });
+      }
+
+      const room = await wtService.getRoom(roomId);
+      if (!room) {
+        return reply.code(404).send({
+          statusCode: 404,
+          error: 'Not Found',
+          message: 'Room not found'
+        });
+      }
+
+      if (room.adminId !== sanitizedAdmin) {
+        return reply.code(403).send({
+          statusCode: 403,
+          error: 'Forbidden',
+          message: 'Only admin can stop playback'
+        });
+      }
+
+      await wtService.pausePlayback(roomId, adminId);
+      return { success: true };
+    } catch (error) {
+      logErrorWithDetails(error, {
+        context: 'Admin stop playback',
+        roomId: (request.params as any).roomId
+      });
+      
+      const safeError = createSafeErrorResponse(error);
+      return reply.code(safeError.statusCode as any).send(safeError);
+    }
+  });
+
 };
+
 
 export default watchTogetherRoutes;

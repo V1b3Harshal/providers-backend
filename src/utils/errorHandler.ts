@@ -1,3 +1,5 @@
+import { NODE_ENV } from '../config/environment';
+
 export interface ApiError {
   statusCode: number;
   error: string;
@@ -32,8 +34,8 @@ export const createSafeErrorResponse = (error: any, statusCode: number = 500): A
     return {
       statusCode,
       error: 'Internal Server Error',
-      message: process.env.NODE_ENV === 'development' ? error.message : 'An unexpected error occurred',
-      details: process.env.NODE_ENV === 'development' ? {
+      message: NODE_ENV === 'development' ? error.message : 'An unexpected error occurred',
+      details: NODE_ENV === 'development' ? {
         stack: error.stack,
         originalError: error.message
       } : undefined
@@ -84,7 +86,7 @@ export const isOperationalError = (error: any): boolean => {
 };
 
 export const sanitizeError = (error: any): ApiError => {
-  if (process.env.NODE_ENV === 'production') {
+  if (NODE_ENV === 'production') {
     return {
       statusCode: error?.statusCode || 500,
       error: 'Internal Server Error',

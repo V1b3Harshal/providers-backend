@@ -25,6 +25,7 @@ export const validateEnvironment = () => {
 // Server Configuration
 export const PORT = parseInt(env.PORT || '3001');
 export const NODE_ENV = env.NODE_ENV || 'development';
+export const SWAGGER_HOST = env.SWAGGER_HOST || env.RAILWAY_PUBLIC_DOMAIN || 'localhost:3001';
 
 // Internal API Authentication
 export const INTERNAL_API_KEY = env.INTERNAL_API_KEY || '';
@@ -59,6 +60,7 @@ export const RATE_LIMIT_WINDOW_MS = parseInt(env.RATE_LIMIT_WINDOW_MS || '60000'
 // WebSocket Configuration
 export const WS_PORT = parseInt(env.WS_PORT || '3002');
 export const WS_MAX_CONNECTIONS = parseInt(env.WS_MAX_CONNECTIONS || '1000');
+export const WEBSOCKET_URL = env.WEBSOCKET_URL || 'ws://localhost:3002';
 
 // Healthchecks.io
 export const HEALTHCHECKS_IO_URL = env.HEALTHCHECKS_IO_URL;

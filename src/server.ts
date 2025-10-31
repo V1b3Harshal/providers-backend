@@ -4,7 +4,7 @@ import helmet from '@fastify/helmet';
 import rateLimit from '@fastify/rate-limit';
 import { connectToRedis, getRedisClient } from './config/redis';
 import { validateEnvironment } from './config/environment';
-import { INTERNAL_API_KEY, CORS_ORIGIN, RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_MS } from './config/environment';
+import { INTERNAL_API_KEY, CORS_ORIGIN, RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_MS, SWAGGER_HOST, PORT } from './config/environment';
 import { createSafeErrorResponse, logErrorWithDetails } from './utils/errorHandler';
 import { logger } from './utils/logger';
 import { Server } from 'socket.io';
@@ -81,7 +81,7 @@ fastify.register(import('@fastify/swagger'), {
       description: 'API for streaming provider management and watch-together functionality',
       version: '1.0.0',
     },
-    host: process.env.SWAGGER_HOST || process.env.RAILWAY_PUBLIC_DOMAIN || 'localhost:3001',
+    host: SWAGGER_HOST,
     schemes: ['https', 'http'],
     consumes: ['application/json'],
     produces: ['application/json'],
@@ -145,10 +145,9 @@ const start = async () => {
     (fastify as any).io = io;
     
     // Then start the server
-    const port = parseInt(process.env.PORT || '3001');
-    await fastify.listen({ port, host: '0.0.0.0' });
-    logger.info(`Providers Backend listening on http://0.0.0.0:${port}`);
-    logger.info(`Swagger docs available at http://0.0.0.0:${port}/docs`);
+    await fastify.listen({ port: PORT, host: '0.0.0.0' });
+    logger.info(`Providers Backend listening on http://0.0.0.0:${PORT}`);
+    logger.info(`Swagger docs available at http://0.0.0.0:${PORT}/docs`);
     logger.info('WebSocket server ready for connections');
   } catch (err) {
     logErrorWithDetails(err, { context: 'Server startup' });
