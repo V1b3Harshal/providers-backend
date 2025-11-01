@@ -55,6 +55,9 @@ export interface WatchTogetherRoom {
   providerId?: string;
   participants: string[];
   currentState: PlaybackState;
+  isPublic: boolean;
+  shareableLink: string | null;
+  maxParticipants: number;
   createdAt: Date;
   updatedAt: Date;
 }

@@ -1,5 +1,6 @@
 import { createClient } from 'redis';
 import { REDIS_URL, REDIS_PASSWORD } from './environment';
+import { logger } from '../utils/logger';
 
 let redisClient: any = null;
 
@@ -57,6 +58,7 @@ export const RedisKeys = {
   rooms: 'room:',
   roomParticipants: 'room:participants:',
   roomState: 'room:state:',
+  activeRooms: 'rooms:active',
   
   // Provider caching
   providerCache: 'provider:',
@@ -193,4 +195,147 @@ export const cleanupExpiredKeys = async () => {
   } catch (error) {
     console.error('Error cleaning up expired keys:', error);
   }
+};
+
+export const renewRoomTTL = async (roomId: string, ttl: number = 3600) => {
+  const client = getRedisClient();
+  const roomKey = `${RedisKeys.rooms}${roomId}`;
+  const participantsKey = `${RedisKeys.roomParticipants}${roomId}`;
+  const stateKey = `${RedisKeys.roomState}${roomId}`;
+  
+  try {
+    // Use Redis transaction to ensure all TTLs are updated atomically
+    const multi = client.multi();
+    multi.expire(roomKey, ttl);
+    multi.expire(participantsKey, ttl);
+    multi.expire(stateKey, ttl);
+    await multi.exec();
+    
+    logger.info(`Renewed TTL for room ${roomId}`);
+  } catch (error) {
+    logger.error(`Error renewing TTL for room ${roomId}:`, error);
+    throw error;
+  }
+};
+
+// Optimized batch operations for better performance
+export const batchRenewRoomTTLs = async (roomIds: string[], ttl: number = 3600) => {
+  const client = getRedisClient();
+  
+  try {
+    const multi = client.multi();
+    
+    for (const roomId of roomIds) {
+      multi.expire(`${RedisKeys.rooms}${roomId}`, ttl);
+      multi.expire(`${RedisKeys.roomParticipants}${roomId}`, ttl);
+      multi.expire(`${RedisKeys.roomState}${roomId}`, ttl);
+    }
+    
+    await multi.exec();
+    logger.info(`Renewed TTL for ${roomIds.length} rooms`);
+  } catch (error) {
+    logger.error(`Error batch renewing TTL for rooms:`, error);
+    throw error;
+  }
+};
+
+// Optimized cleanup for inactive rooms
+export const cleanupInactiveRooms = async (inactivityThresholdMs: number = 300000) => { // 5 minutes
+  const client = getRedisClient();
+  const activeRooms = await getActiveRooms();
+  let cleanedCount = 0;
+  
+  try {
+    const now = Date.now();
+    const roomsToClean: string[] = [];
+    
+    // Check each room for inactivity
+    for (const roomId of activeRooms) {
+      const participantsKey = `${RedisKeys.roomParticipants}${roomId}`;
+      const participants = await client.hGetAll(participantsKey);
+      
+      let isInactive = true;
+      for (const lastSeen of Object.values(participants)) {
+        const lastSeenTime = parseInt(lastSeen as string);
+        if (now - lastSeenTime < inactivityThresholdMs) {
+          isInactive = false;
+          break;
+        }
+      }
+      
+      if (isInactive) {
+        roomsToClean.push(roomId);
+      }
+    }
+    
+    // Clean up inactive rooms in batch
+    if (roomsToClean.length > 0) {
+      const multi = client.multi();
+      
+      for (const roomId of roomsToClean) {
+        multi.del(`${RedisKeys.rooms}${roomId}`);
+        multi.del(`${RedisKeys.roomParticipants}${roomId}`);
+        multi.del(`${RedisKeys.roomState}${roomId}`);
+        multi.sRem(RedisKeys.activeRooms, roomId);
+      }
+      
+      await multi.exec();
+      cleanedCount = roomsToClean.length;
+      logger.info(`Cleaned up ${cleanedCount} inactive rooms`);
+    }
+    
+    return cleanedCount;
+  } catch (error) {
+    logger.error('Error cleaning up inactive rooms:', error);
+    throw error;
+  }
+};
+
+// Memory-efficient room listing with pagination
+export const getRoomsWithPagination = async (page: number = 1, limit: number = 20) => {
+  const client = getRedisClient();
+  const activeRooms = await getActiveRooms();
+  const startIndex = (page - 1) * limit;
+  const endIndex = startIndex + limit;
+  
+  try {
+    const paginatedRoomIds = activeRooms.slice(startIndex, endIndex);
+    const rooms = [];
+    
+    for (const roomId of paginatedRoomIds) {
+      const roomData = await client.get(`${RedisKeys.rooms}${roomId}`);
+      if (roomData) {
+        rooms.push(JSON.parse(roomData));
+      }
+    }
+    
+    return {
+      rooms,
+      pagination: {
+        page,
+        limit,
+        total: activeRooms.length,
+        totalPages: Math.ceil(activeRooms.length / limit)
+      }
+    };
+  } catch (error) {
+    logger.error('Error getting paginated rooms:', error);
+    throw error;
+  }
+};
+
+export const addRoomToActiveRooms = async (roomId: string) => {
+  const client = getRedisClient();
+  await client.sAdd(RedisKeys.activeRooms, roomId);
+  await client.expire(RedisKeys.activeRooms, 86400); // 24 hour TTL for the active rooms set
+};
+
+export const removeRoomFromActiveRooms = async (roomId: string) => {
+  const client = getRedisClient();
+  await client.sRem(RedisKeys.activeRooms, roomId);
+};
+
+export const getActiveRooms = async () => {
+  const client = getRedisClient();
+  return await client.sMembers(RedisKeys.activeRooms);
 };

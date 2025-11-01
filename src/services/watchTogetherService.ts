@@ -10,7 +10,16 @@ import {
   setRoomState,
   getRoomState,
   getRedisClient,
-  RedisKeys
+  RedisKeys,
+  getActiveRooms,
+  addRoomToActiveRooms,
+  removeRoomFromActiveRooms,
+  renewRoomTTL
+} from '../config/redis';
+import {
+  batchRenewRoomTTLs,
+  cleanupInactiveRooms,
+  getRoomsWithPagination
 } from '../config/redis';
 import { v4 as uuidv4 } from 'uuid';
 import { logger } from '../utils/logger';
@@ -49,16 +58,14 @@ export class WatchTogetherService {
 
       socket.on('create_room', async (data, callback) => {
         try {
-          const { name, mediaId, mediaType, adminId, providerId, token } = data;
+          const { name, mediaId, mediaType, providerId, token, isPublic = true, maxParticipants = 10 } = data;
           
           // Verify JWT token
           const decoded = jwt.verify(token, JWT_SECRET) as any;
-          if (decoded.userId !== adminId) {
-            callback({ success: false, error: 'User ID mismatch' });
-            return;
-          }
-
+          const adminId = decoded.userId;
+          
           const roomId = uuidv4();
+          const shareableLink = isPublic ? `${process.env.FRONTEND_URL || 'http://localhost:3000'}/watch-together/${roomId}` : null;
           
           const room: WatchTogetherRoom = {
             id: roomId,
@@ -76,12 +83,32 @@ export class WatchTogetherService {
               currentEpisode: 1,
               providerUrl: this.generateProviderUrl(providerId || 'vidnest', mediaId)
             },
+            isPublic,
+            shareableLink: shareableLink || null,
+            maxParticipants,
             createdAt: new Date(),
             updatedAt: new Date()
           };
 
-          await setRoom(roomId, room);
-          await addRoomParticipant(roomId, adminId);
+          // Use atomic operations to create room and add to active rooms set
+          const client = getRedisClient();
+          const multi = client.multi();
+          
+          // Set room data
+          multi.setEx(`${RedisKeys.rooms}${roomId}`, 3600, JSON.stringify(room));
+          
+          // Add admin as participant (only once)
+          multi.sAdd(`${RedisKeys.roomParticipants}${roomId}`, adminId);
+          multi.expire(`${RedisKeys.roomParticipants}${roomId}`, 3600);
+          
+          // Set initial room state
+          multi.setEx(`${RedisKeys.roomState}${roomId}`, 3600, JSON.stringify(room.currentState));
+          
+          // Add room to active rooms set
+          multi.sAdd(RedisKeys.activeRooms, roomId);
+          multi.expire(RedisKeys.activeRooms, 86400);
+          
+          await multi.exec();
           
           socket.join(roomId);
           socket.data.roomId = roomId;
@@ -89,7 +116,7 @@ export class WatchTogetherService {
           socket.data.isAdmin = true;
 
           this.io.to(roomId).emit('room_created', room);
-          callback({ success: true, roomId, room });
+          callback({ success: true, roomId, room, shareableLink });
         } catch (error) {
           logger.error('Error creating room:', error);
           callback({ success: false, error: 'Failed to create room' });
@@ -98,16 +125,19 @@ export class WatchTogetherService {
 
       socket.on('join_room', async (data, callback) => {
         try {
-          const { roomId, userId, token } = data;
+          const { roomId, token, shareableLink } = data;
           
           // Verify JWT token
           const decoded = jwt.verify(token, JWT_SECRET) as any;
-          if (decoded.userId !== userId) {
-            callback({ success: false, error: 'User ID mismatch' });
-            return;
-          }
+          const userId = decoded.userId;
 
           const room = await getRoom(roomId);
+          
+          // Validate shareable link if provided
+          if (shareableLink && room.shareableLink !== shareableLink) {
+            callback({ success: false, error: 'Invalid shareable link' });
+            return;
+          }
           if (!room) {
             callback({ success: false, error: 'Room not found' });
             return;
@@ -118,7 +148,7 @@ export class WatchTogetherService {
             return;
           }
 
-          if (room.participants.length >= this.MAX_PARTICIPANTS) {
+          if (room.participants.length >= room.maxParticipants) {
             callback({ success: false, error: 'Room is full' });
             return;
           }
@@ -153,7 +183,8 @@ export class WatchTogetherService {
 
       socket.on('leave_room', async (data, callback) => {
         try {
-          const { roomId, userId } = data;
+          const { roomId } = data;
+          const userId = socket.data.userId;
           
           const room = await getRoom(roomId as string);
           if (!room) {
@@ -181,7 +212,16 @@ export class WatchTogetherService {
           }
 
           if (room.participants.length === 0) {
-            await deleteRoom(roomId);
+            // Use atomic operations to clean up room
+            const client = getRedisClient();
+            const multi = client.multi();
+            
+            multi.del(`${RedisKeys.rooms}${roomId}`);
+            multi.del(`${RedisKeys.roomParticipants}${roomId}`);
+            multi.del(`${RedisKeys.roomState}${roomId}`);
+            multi.sRem(RedisKeys.activeRooms, roomId);
+            
+            await multi.exec();
             this.io.to(roomId).emit('room_deleted', { roomId });
           } else {
             this.io.to(roomId).emit('user_left', { userId, participants: room.participants });
@@ -196,7 +236,9 @@ export class WatchTogetherService {
 
       socket.on('playback_action', async (data) => {
         try {
-          const { roomId, action, userId, isAdmin } = data;
+          const { roomId, action, timestamp } = data;
+          const userId = socket.data.userId;
+          const isAdmin = socket.data.isAdmin;
           
           const room = await getRoom(roomId);
           if (!room) {
@@ -207,6 +249,14 @@ export class WatchTogetherService {
           // Check if user is authenticated and has permission
           if (!isAdmin && room.adminId !== userId) {
             socket.emit('error', { message: 'Only admin can perform this action' });
+            return;
+          }
+
+          // Prevent outdated actions from being processed
+          const actionTime = new Date(timestamp);
+          const roomTime = new Date(room.updatedAt);
+          if (actionTime < roomTime) {
+            logger.warn(`Received outdated action from user ${userId} in room ${roomId}`);
             return;
           }
 
@@ -280,7 +330,8 @@ export class WatchTogetherService {
 
       socket.on('sync_request', async (data) => {
         try {
-          const { roomId, userId } = data;
+          const { roomId } = data;
+          const userId = socket.data.userId;
           
           const room = await getRoom(roomId);
           if (!room) {
@@ -302,13 +353,87 @@ export class WatchTogetherService {
 
       socket.on('heartbeat', async (data) => {
         try {
-          const { roomId, userId } = data;
+          const { roomId } = data;
+          const userId = socket.data.userId;
           if (roomId && userId) {
-            // Update user activity timestamp
+            // Update user activity timestamp and renew TTL
             await addRoomParticipant(roomId, userId);
+            await renewRoomTTL(roomId);
+            
+            // Update user's last seen time
+            const client = getRedisClient();
+            await client.hSet(`${RedisKeys.roomParticipants}${roomId}`, userId, Date.now().toString());
           }
         } catch (error) {
           logger.error('Error handling heartbeat:', error);
+        }
+      });
+
+      socket.on('get_user_status', async (data) => {
+        try {
+          const { roomId } = data;
+          const client = getRedisClient();
+          const participants = await client.hGetAll(`${RedisKeys.roomParticipants}${roomId}`);
+          
+          const userStatus: { [userId: string]: { lastSeen: number; isActive: boolean } } = {};
+          
+          for (const [userId, lastSeen] of Object.entries(participants)) {
+            const lastSeenTime = parseInt(lastSeen as string);
+            userStatus[userId] = {
+              lastSeen: lastSeenTime,
+              isActive: Date.now() - lastSeenTime < 30000 // Active if seen in last 30 seconds
+            };
+          }
+          
+          socket.emit('user_status', userStatus);
+        } catch (error) {
+          logger.error('Error getting user status:', error);
+        }
+      });
+
+      socket.on('request_invite', async (data, callback) => {
+        try {
+          const { roomId, targetUserId } = data;
+          const requestingUserId = socket.data.userId;
+          const isAdmin = socket.data.isAdmin;
+          
+          const room = await getRoom(roomId);
+          if (!room) {
+            callback({ success: false, error: 'Room not found' });
+            return;
+          }
+
+          // Only admin can send invites
+          if (!isAdmin && room.adminId !== requestingUserId) {
+            callback({ success: false, error: 'Only admin can send invites' });
+            return;
+          }
+
+          // Check if target user is already in the room
+          if (room.participants.includes(targetUserId)) {
+            callback({ success: false, error: 'User already in room' });
+            return;
+          }
+
+          // Check if room has space
+          if (room.participants.length >= room.maxParticipants) {
+            callback({ success: false, error: 'Room is full' });
+            return;
+          }
+
+          // Send invite to target user (this would need to be implemented with user notifications)
+          this.io.to(targetUserId).emit('room_invite', {
+            roomId,
+            roomName: room.name,
+            fromUserId: requestingUserId,
+            shareableLink: room.shareableLink,
+            expiresAt: Date.now() + 24 * 60 * 60 * 1000 // 24 hours
+          });
+
+          callback({ success: true, message: 'Invite sent successfully' });
+        } catch (error) {
+          logger.error('Error sending invite:', error);
+          callback({ success: false, error: 'Failed to send invite' });
         }
       });
 
@@ -333,9 +458,16 @@ export class WatchTogetherService {
                   endedBy: userId
                 });
                 
-                // Clean up room
-                await deleteRoom(roomId);
-                await setRoomState(roomId, null);
+                // Clean up room using atomic operations
+                const client = getRedisClient();
+                const multi = client.multi();
+                
+                multi.del(`${RedisKeys.rooms}${roomId}`);
+                multi.del(`${RedisKeys.roomParticipants}${roomId}`);
+                multi.del(`${RedisKeys.roomState}${roomId}`);
+                multi.sRem(RedisKeys.activeRooms, roomId);
+                
+                await multi.exec();
               } else {
                 // If regular user leaves, notify remaining participants
                 this.io.to(roomId).emit('user_left', { userId, participants: room.participants });
@@ -361,7 +493,17 @@ export class WatchTogetherService {
   private startCleanupInterval(): void {
     setInterval(async () => {
       try {
-        await this.cleanupEmptyRooms();
+        // Use optimized cleanup for inactive rooms first
+        const cleanedInactive = await cleanupInactiveRooms();
+        if (cleanedInactive > 0) {
+          logger.info(`Cleaned up ${cleanedInactive} inactive rooms`);
+        }
+        
+        // Fall back to traditional cleanup for empty rooms
+        const cleanedEmpty = await this.cleanupEmptyRooms();
+        if (cleanedEmpty > 0) {
+          logger.info(`Cleaned up ${cleanedEmpty} empty rooms`);
+        }
       } catch (error) {
         logger.error('Error during room cleanup:', error);
       }
@@ -381,14 +523,13 @@ export class WatchTogetherService {
   }
 
   async getAllRooms(): Promise<WatchTogetherRoom[]> {
-    const client = getRedisClient();
-    const keys = await client.keys(`${RedisKeys.rooms}*`);
-    
+    const activeRoomIds = await getActiveRooms();
     const rooms: WatchTogetherRoom[] = [];
-    for (const key of keys) {
-      const data = await client.get(key);
-      if (data) {
-        rooms.push(JSON.parse(data));
+    
+    for (const roomId of activeRoomIds) {
+      const room = await getRoom(roomId);
+      if (room) {
+        rooms.push(room);
       }
     }
     
@@ -396,21 +537,53 @@ export class WatchTogetherService {
   }
 
   async cleanupEmptyRooms(): Promise<number> {
-    const client = getRedisClient();
-    const keys = await client.keys(`${RedisKeys.rooms}*`);
+    const activeRoomIds = await getActiveRooms();
+    const emptyRooms: string[] = [];
     
-    let cleanedCount = 0;
-    for (const key of keys) {
-      const roomId = key.replace(RedisKeys.rooms, '');
+    for (const roomId of activeRoomIds) {
       const participants = await getRoomParticipants(roomId);
       
       if (participants.length === 0) {
-        await deleteRoom(roomId);
-        cleanedCount++;
+        emptyRooms.push(roomId);
       }
     }
     
-    return cleanedCount;
+    if (emptyRooms.length > 0) {
+      // Use batch cleanup for better performance
+      const client = getRedisClient();
+      const multi = client.multi();
+      
+      for (const roomId of emptyRooms) {
+        multi.del(`${RedisKeys.rooms}${roomId}`);
+        multi.del(`${RedisKeys.roomParticipants}${roomId}`);
+        multi.del(`${RedisKeys.roomState}${roomId}`);
+        multi.sRem(RedisKeys.activeRooms, roomId);
+      }
+      
+      await multi.exec();
+      logger.info(`Batch cleaned up ${emptyRooms.length} empty rooms`);
+      return emptyRooms.length;
+    }
+    
+    return 0;
+  }
+
+  // Get paginated list of rooms for better performance
+  async getRoomsWithPagination(page: number = 1, limit: number = 20): Promise<{
+    rooms: WatchTogetherRoom[];
+    pagination: {
+      page: number;
+      limit: number;
+      total: number;
+      totalPages: number;
+    };
+  }> {
+    return await getRoomsWithPagination(page, limit);
+  }
+
+  // Batch renew TTL for multiple rooms (optimized)
+  async batchRenewRoomTTLs(roomIds: string[], ttl: number = 3600): Promise<void> {
+    await batchRenewRoomTTLs(roomIds, ttl);
   }
 
   async broadcastToRoom(roomId: string, event: string, data: any): Promise<void> {
@@ -501,8 +674,13 @@ export class WatchTogetherService {
     mediaId: string;
     mediaType: 'movie' | 'tv';
     providerId?: string;
+    isPublic?: boolean;
+    maxParticipants?: number;
   }): Promise<WatchTogetherRoom> {
     const roomId = uuidv4();
+    const isPublic = roomData.isPublic ?? true;
+    const maxParticipants = roomData.maxParticipants ?? 10;
+    const shareableLink = isPublic ? `${process.env.FRONTEND_URL || 'http://localhost:3000'}/watch-together/${roomId}` : undefined;
     
     const room: WatchTogetherRoom = {
       id: roomId,
@@ -519,12 +697,32 @@ export class WatchTogetherService {
         playbackRate: 1,
         providerUrl: this.generateProviderUrl(roomData.providerId || 'vidnest', roomData.mediaId)
       },
+      isPublic,
+      shareableLink: shareableLink || null,
+      maxParticipants,
       createdAt: new Date(),
       updatedAt: new Date()
     };
 
-    await setRoom(roomId, room);
-    await addRoomParticipant(roomId, roomData.adminId);
+    // Use atomic operations to create room and add to active rooms set
+    const client = getRedisClient();
+    const multi = client.multi();
+    
+    // Set room data
+    multi.setEx(`${RedisKeys.rooms}${roomId}`, 3600, JSON.stringify(room));
+    
+    // Add admin as participant
+    multi.sAdd(`${RedisKeys.roomParticipants}${roomId}`, roomData.adminId);
+    multi.expire(`${RedisKeys.roomParticipants}${roomId}`, 3600);
+    
+    // Set initial room state
+    multi.setEx(`${RedisKeys.roomState}${roomId}`, 3600, JSON.stringify(room.currentState));
+    
+    // Add room to active rooms set
+    multi.sAdd(RedisKeys.activeRooms, roomId);
+    multi.expire(RedisKeys.activeRooms, 86400);
+    
+    await multi.exec();
     
     return room;
   }
@@ -619,8 +817,16 @@ export class WatchTogetherService {
       endedBy: adminId
     });
 
-    await deleteRoom(roomId);
-    await setRoomState(roomId, null);
+    // Use atomic operations to clean up room
+    const client = getRedisClient();
+    const multi = client.multi();
+    
+    multi.del(`${RedisKeys.rooms}${roomId}`);
+    multi.del(`${RedisKeys.roomParticipants}${roomId}`);
+    multi.del(`${RedisKeys.roomState}${roomId}`);
+    multi.sRem(RedisKeys.activeRooms, roomId);
+    
+    await multi.exec();
   }
 
   // Additional methods for enhanced admin control

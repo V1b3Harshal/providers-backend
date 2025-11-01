@@ -9,6 +9,7 @@ import { createSafeErrorResponse, logErrorWithDetails } from './utils/errorHandl
 import { logger } from './utils/logger';
 import { Server } from 'socket.io';
 import { createAdapter } from '@socket.io/redis-adapter';
+import '@fastify/jwt';
 
 // Import routes
 import providerRoutes from './routes/providers';
@@ -19,6 +20,11 @@ validateEnvironment();
 
 const fastify = Fastify({
   logger: false, // We'll use our custom logger
+});
+
+// Initialize JWT plugin
+fastify.register(require('@fastify/jwt'), {
+  secret: process.env.JWT_SECRET!,
 });
 
 // Enable CORS for frontend interaction

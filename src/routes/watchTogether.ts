@@ -3,21 +3,25 @@ import { watchTogetherService } from '../services/watchTogetherService';
 import { sanitizeRoomData, sanitizePlaybackAction, sanitizeUserId } from '../utils/sanitizer';
 import { createSafeErrorResponse, logErrorWithDetails } from '../utils/errorHandler';
 import { logger } from '../utils/logger';
+import { userAuth } from '../middleware/userAuth';
 
 const watchTogetherRoutes: FastifyPluginAsync = async (fastify) => {
   const io = (fastify as any).io;
   const wtService = watchTogetherService(io);
+  // Apply user authentication to all watch together routes
+  fastify.addHook('onRequest', userAuth);
+
   // Create a new watch-together room
   fastify.post('/rooms', {
     schema: {
       body: {
         type: 'object',
-        required: ['name', 'mediaId', 'mediaType', 'adminId'],
+        required: ['name', 'mediaId', 'mediaType'],
         properties: {
           name: { type: 'string', maxLength: 100 },
           mediaId: { type: 'string', maxLength: 20 },
           mediaType: { type: 'string', enum: ['movie', 'tv'] },
-          adminId: { type: 'string', maxLength: 50 }
+          providerId: { type: 'string', maxLength: 50 }
         }
       },
       response: {
@@ -73,6 +77,7 @@ const watchTogetherRoutes: FastifyPluginAsync = async (fastify) => {
     }
   }, async (request, reply) => {
     try {
+      const user = (request as any).user;
       const roomData = sanitizeRoomData(request.body);
       if (!roomData) {
         return reply.code(400).send({
@@ -82,6 +87,9 @@ const watchTogetherRoutes: FastifyPluginAsync = async (fastify) => {
         });
       }
 
+      // Use authenticated user as admin instead of provided adminId
+      const adminId = user.userId;
+      
       const existingRoom = await wtService.getAllRooms();
       if (existingRoom.some(r => r.name === roomData.name)) {
         return reply.code(409 as any).send({
@@ -93,7 +101,7 @@ const watchTogetherRoutes: FastifyPluginAsync = async (fastify) => {
 
       const newRoom = await wtService.createRoom({
         name: roomData.name,
-        adminId: roomData.adminId,
+        adminId: adminId,
         mediaId: roomData.mediaId,
         mediaType: roomData.mediaType,
         providerId: roomData.providerId
@@ -120,9 +128,8 @@ const watchTogetherRoutes: FastifyPluginAsync = async (fastify) => {
       },
       body: {
         type: 'object',
-        required: ['userId'],
         properties: {
-          userId: { type: 'string', maxLength: 50 }
+          shareableLink: { type: 'string', maxLength: 255 }
         }
       },
       response: {
@@ -188,9 +195,9 @@ const watchTogetherRoutes: FastifyPluginAsync = async (fastify) => {
   }, async (request, reply) => {
     try {
       const { roomId } = request.params as { roomId: string };
-      const { userId } = request.body as { userId: string };
+      const user = (request as any).user;
       
-      const sanitizedUserId = sanitizeUserId(userId);
+      const sanitizedUserId = sanitizeUserId(user.userId);
       if (!sanitizedUserId) {
         return reply.code(400).send({
           statusCode: 400,
@@ -243,11 +250,7 @@ const watchTogetherRoutes: FastifyPluginAsync = async (fastify) => {
         }
       },
       body: {
-        type: 'object',
-        required: ['userId'],
-        properties: {
-          userId: { type: 'string', maxLength: 50 }
-        }
+        type: 'object'
       },
       response: {
         200: {
@@ -289,9 +292,9 @@ const watchTogetherRoutes: FastifyPluginAsync = async (fastify) => {
   }, async (request, reply) => {
     try {
       const { roomId } = request.params as { roomId: string };
-      const { userId } = request.body as { userId: string };
+      const user = (request as any).user;
       
-      const sanitizedUserId = sanitizeUserId(userId);
+      const sanitizedUserId = sanitizeUserId(user.userId);
       if (!sanitizedUserId) {
         return reply.code(400).send({
           statusCode: 400,
@@ -578,9 +581,10 @@ const watchTogetherRoutes: FastifyPluginAsync = async (fastify) => {
   }, async (request, reply) => {
     try {
       const { roomId } = request.params as { roomId: string };
-      const { currentAdminId, newAdminId } = request.body as { currentAdminId: string; newAdminId: string };
+      const user = (request as any).user;
       
-      const sanitizedCurrentAdmin = sanitizeUserId(currentAdminId);
+      const sanitizedCurrentAdmin = sanitizeUserId(user.userId);
+      const { newAdminId } = request.body as { newAdminId: string };
       const sanitizedNewAdmin = sanitizeUserId(newAdminId);
       
       if (!sanitizedCurrentAdmin || !sanitizedNewAdmin) {
@@ -696,9 +700,10 @@ const watchTogetherRoutes: FastifyPluginAsync = async (fastify) => {
   }, async (request, reply) => {
     try {
       const { roomId } = request.params as { roomId: string };
-      const { adminId, userIdToKick } = request.body as { adminId: string; userIdToKick: string };
+      const user = (request as any).user;
+      const { userIdToKick } = request.body as { userIdToKick: string };
       
-      const sanitizedAdmin = sanitizeUserId(adminId);
+      const sanitizedAdmin = sanitizeUserId(user.userId);
       const sanitizedUserToKick = sanitizeUserId(userIdToKick);
       
       if (!sanitizedAdmin || !sanitizedUserToKick) {
@@ -823,9 +828,10 @@ const watchTogetherRoutes: FastifyPluginAsync = async (fastify) => {
   }, async (request, reply) => {
     try {
       const { roomId } = request.params as { roomId: string };
-      const { adminId, reason } = request.body as { adminId: string; reason?: string };
+      const user = (request as any).user;
+      const { reason } = request.body as { reason?: string };
       
-      const sanitizedAdmin = sanitizeUserId(adminId);
+      const sanitizedAdmin = sanitizeUserId(user.userId);
       if (!sanitizedAdmin) {
         return reply.code(400).send({
           statusCode: 400,
@@ -851,7 +857,7 @@ const watchTogetherRoutes: FastifyPluginAsync = async (fastify) => {
         });
       }
 
-      await wtService.endSession(roomId, adminId, reason);
+      await wtService.endSession(roomId, user.userId, reason);
       return { success: true };
     } catch (error) {
       logErrorWithDetails(error, {
@@ -923,9 +929,10 @@ const watchTogetherRoutes: FastifyPluginAsync = async (fastify) => {
   }, async (request, reply) => {
     try {
       const { roomId } = request.params as { roomId: string };
-      const { adminId, skipType, skipAmount } = request.body as { adminId: string; skipType: 'forward' | 'backward'; skipAmount: number };
+      const user = (request as any).user;
+      const { skipType, skipAmount } = request.body as { skipType: 'forward' | 'backward'; skipAmount: number };
       
-      const sanitizedAdmin = sanitizeUserId(adminId);
+      const sanitizedAdmin = sanitizeUserId(user.userId);
       if (!sanitizedAdmin) {
         return reply.code(400).send({
           statusCode: 400,
@@ -951,7 +958,7 @@ const watchTogetherRoutes: FastifyPluginAsync = async (fastify) => {
         });
       }
 
-      await wtService.skipTime(roomId, adminId, skipType, skipAmount);
+      await wtService.skipTime(roomId, user.userId, skipType, skipAmount);
       return { success: true };
     } catch (error) {
       logErrorWithDetails(error, {
@@ -1021,9 +1028,9 @@ const watchTogetherRoutes: FastifyPluginAsync = async (fastify) => {
   }, async (request, reply) => {
     try {
       const { roomId } = request.params as { roomId: string };
-      const { adminId } = request.body as { adminId: string };
+      const user = (request as any).user;
       
-      const sanitizedAdmin = sanitizeUserId(adminId);
+      const sanitizedAdmin = sanitizeUserId(user.userId);
       if (!sanitizedAdmin) {
         return reply.code(400).send({
           statusCode: 400,
@@ -1049,7 +1056,7 @@ const watchTogetherRoutes: FastifyPluginAsync = async (fastify) => {
         });
       }
 
-      await wtService.pausePlayback(roomId, adminId);
+      await wtService.pausePlayback(roomId, user.userId);
       return { success: true };
     } catch (error) {
       logErrorWithDetails(error, {
@@ -1062,7 +1069,205 @@ const watchTogetherRoutes: FastifyPluginAsync = async (fastify) => {
     }
   });
 
+  // Get room shareable link
+  fastify.get('/rooms/:roomId/share-link', {
+    schema: {
+      params: {
+        type: 'object',
+        required: ['roomId'],
+        properties: {
+          roomId: { type: 'string', maxLength: 50 }
+        }
+      },
+      response: {
+        200: {
+          type: 'object',
+          required: ['success', 'data'],
+          properties: {
+            success: { type: 'boolean' },
+            data: {
+              type: 'object',
+              properties: {
+                shareableLink: { type: ['string', 'null'] },
+                isPublic: { type: 'boolean' }
+              }
+            }
+          }
+        },
+        404: {
+          type: 'object',
+          required: ['statusCode', 'error', 'message'],
+          properties: {
+            statusCode: { type: 'number' },
+            error: { type: 'string' },
+            message: { type: 'string' }
+          }
+        }
+      }
+    }
+  }, async (request, reply) => {
+    try {
+      const { roomId } = request.params as { roomId: string };
+      
+      const room = await wtService.getRoom(roomId);
+      if (!room) {
+        return reply.code(404).send({
+          statusCode: 404,
+          error: 'Not Found',
+          message: 'Room not found'
+        });
+      }
+
+      return {
+        success: true,
+        data: {
+          shareableLink: room.shareableLink,
+          isPublic: room.isPublic
+        }
+      };
+    } catch (error) {
+      logErrorWithDetails(error, {
+        context: 'Get shareable link',
+        roomId: (request.params as any).roomId
+      });
+      
+      const safeError = createSafeErrorResponse(error);
+      return reply.code(safeError.statusCode as any).send(safeError);
+    }
+  });
+
+  // Update room settings (admin only)
+  fastify.put('/rooms/:roomId/settings', {
+    schema: {
+      params: {
+        type: 'object',
+        required: ['roomId'],
+        properties: {
+          roomId: { type: 'string', maxLength: 50 }
+        }
+      },
+      body: {
+        type: 'object',
+        properties: {
+          isPublic: { type: 'boolean' },
+          maxParticipants: { type: 'number', minimum: 2, maximum: 50 }
+        }
+      },
+      response: {
+        200: {
+          type: 'object',
+          required: ['success', 'data'],
+          properties: {
+            success: { type: 'boolean' },
+            data: {
+              type: 'object',
+              properties: {
+                isPublic: { type: 'boolean' },
+                maxParticipants: { type: 'number' },
+                shareableLink: { type: ['string', 'null'] }
+              }
+            }
+          }
+        },
+        400: {
+          type: 'object',
+          required: ['statusCode', 'error', 'message'],
+          properties: {
+            statusCode: { type: 'number' },
+            error: { type: 'string' },
+            message: { type: 'string' }
+          }
+        },
+        403: {
+          type: 'object',
+          required: ['statusCode', 'error', 'message'],
+          properties: {
+            statusCode: { type: 'number' },
+            error: { type: 'string' },
+            message: { type: 'string' }
+          }
+        },
+        404: {
+          type: 'object',
+          required: ['statusCode', 'error', 'message'],
+          properties: {
+            statusCode: { type: 'number' },
+            error: { type: 'string' },
+            message: { type: 'string' }
+          }
+        }
+      }
+    }
+  }, async (request, reply) => {
+    try {
+      const { roomId } = request.params as { roomId: string };
+      const user = (request as any).user;
+      const { isPublic, maxParticipants } = request.body as {
+        isPublic?: boolean;
+        maxParticipants?: number
+      };
+      
+      const sanitizedAdmin = sanitizeUserId(user.userId);
+      if (!sanitizedAdmin) {
+        return reply.code(400).send({
+          statusCode: 400,
+          error: 'Bad Request',
+          message: 'Invalid admin ID'
+        });
+      }
+
+      const room = await wtService.getRoom(roomId);
+      if (!room) {
+        return reply.code(404).send({
+          statusCode: 404,
+          error: 'Not Found',
+          message: 'Room not found'
+        });
+      }
+
+      if (room.adminId !== sanitizedAdmin) {
+        return reply.code(403).send({
+          statusCode: 403,
+          error: 'Forbidden',
+          message: 'Only admin can update room settings'
+        });
+      }
+
+      // Update room settings
+      if (isPublic !== undefined) {
+        room.isPublic = isPublic;
+        room.shareableLink = isPublic ?
+          `${process.env.FRONTEND_URL || 'http://localhost:3000'}/watch-together/${roomId}` :
+          null;
+      }
+      
+      if (maxParticipants !== undefined) {
+        room.maxParticipants = maxParticipants;
+      }
+
+      room.updatedAt = new Date();
+      await wtService.setRoom(roomId, room);
+
+      return {
+        success: true,
+        data: {
+          isPublic: room.isPublic,
+          maxParticipants: room.maxParticipants,
+          shareableLink: room.shareableLink
+        }
+      };
+    } catch (error) {
+      logErrorWithDetails(error, {
+        context: 'Update room settings',
+        roomId: (request.params as any).roomId
+      });
+      
+      const safeError = createSafeErrorResponse(error);
+      return reply.code(safeError.statusCode as any).send(safeError);
+    }
+  });
 };
+
 
 
 export default watchTogetherRoutes;
