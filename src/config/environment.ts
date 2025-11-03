@@ -47,7 +47,7 @@ export const PROXY_URLS = env.PROXY_URLS ? env.PROXY_URLS.split(',') : [];
 export const PROXY_ROTATION_INTERVAL = parseInt(env.PROXY_ROTATION_INTERVAL || '300000');
 
 // CORS Configuration
-export const CORS_ORIGIN = env.CORS_ORIGIN ? env.CORS_ORIGIN.split(',') : ['*'];
+export const CORS_ORIGIN = env.CORS_ORIGIN || env.FRONTEND_URL || 'http://localhost:3000';
 
 // JWT Configuration
 export const JWT_SECRET = env.JWT_SECRET || 'your-jwt-secret-key';
