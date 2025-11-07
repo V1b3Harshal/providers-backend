@@ -9,7 +9,6 @@ export interface Provider {
     requests: number;
     windowMs: number;
   };
-  proxyRequired: boolean;
 }
 
 export interface ProviderEmbedUrl {
@@ -28,23 +27,6 @@ export interface ProviderHealthStatus {
   error?: string;
 }
 
-export interface ProxyConfig {
-  url: string;
-  enabled: boolean;
-  lastUsed: Date;
-  requestCount: number;
-  successRate: number;
-  healthCheckUrl?: string;
-}
-
-export interface ProxyHealthStatus {
-  proxyUrl: string;
-  status: 'healthy' | 'unhealthy' | 'unknown';
-  lastChecked: Date;
-  responseTime?: number;
-  error?: string;
-  successRate: number;
-}
 
 export interface WatchTogetherRoom {
   id: string;

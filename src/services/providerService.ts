@@ -1,162 +1,199 @@
-import axios from 'axios';
-import { Provider, ProviderEmbedUrl, ProviderHealthStatus } from '../types';
-import { getProviderCache, setProviderCache } from '../config/redis';
-import { RedisKeys } from '../config/redis';
+import { createSafeErrorResponse, logErrorWithDetails, ValidationError, NotFoundError, ProviderError, ExternalServiceError } from '../utils/errorHandler';
+import { logger } from '../utils/logger';
+import { getRedisClient, RedisKeys } from '../config/redis';
+import { TMDB_API_KEY, TMDB_API_URL, VIDNEST_BASE_URL } from '../config/environment';
+
+export interface ProviderEmbedData {
+  provider: string;
+  embedUrl: string;
+  iframeCode: string;
+}
+
+export interface ProviderConfig {
+  id: string;
+  name: string;
+  baseUrl: string;
+  enabled: boolean;
+  iframeTemplate: string;
+  healthCheckUrl?: string;
+  rateLimit?: {
+    requests: number;
+    windowMs: number;
+  };
+}
 
 export class ProviderService {
-  private providers: Provider[] = [
-    {
-      id: 'vidnest',
-      name: 'VidNest',
-      baseUrl: 'https://vidnest.fun',
-      iframeTemplate: '<iframe src="https://vidnest.fun/movie/{id}" frameBorder="0" scrolling="no" allowFullScreen></iframe>',
-      enabled: true,
-      healthCheckUrl: 'https://vidnest.fun',
-      rateLimit: { requests: 10, windowMs: 60000 },
-      proxyRequired: true
-    },
-    {
-      id: 'vidsrc',
-      name: 'VidSrc',
-      baseUrl: 'https://vidsrc.to',
-      iframeTemplate: '<iframe src="https://vidsrc.to/embed-{id}" frameBorder="0" scrolling="no" allowFullScreen></iframe>',
-      enabled: true,
-      healthCheckUrl: 'https://vidsrc.to',
-      rateLimit: { requests: 15, windowMs: 60000 },
-      proxyRequired: true
-    },
-    {
-      id: 'embed',
-      name: 'EmbedStream',
-      baseUrl: 'https://embed.stream',
-      iframeTemplate: '<iframe src="https://embed.stream/embed/{id}" frameBorder="0" scrolling="no" allowFullScreen></iframe>',
-      enabled: true,
-      healthCheckUrl: 'https://embed.stream',
-      rateLimit: { requests: 20, windowMs: 60000 },
-      proxyRequired: false
-    }
-  ];
+  private providers: Map<string, ProviderConfig> = new Map();
+  private redisClient: any;
 
-  async getProviderEmbedUrl(providerId: string, mediaId: string): Promise<ProviderEmbedUrl> {
-    // Check cache first
-    const cacheKey = `${providerId}:${mediaId}`;
-    const cached = await getProviderCache('embed', cacheKey);
-    if (cached) {
-      return cached;
-    }
-
-    const provider = this.providers.find(p => p.id === providerId);
-    if (!provider) {
-      throw new Error(`Provider ${providerId} not found`);
-    }
-
-    if (!provider.enabled) {
-      throw new Error(`Provider ${providerId} is disabled`);
-    }
-
-    // Generate embed URL and iframe code
-    const embedUrl = `${provider.baseUrl}/movie/${mediaId}`;
-    const iframeCode = provider.iframeTemplate.replace('{id}', mediaId);
-
-    const result: ProviderEmbedUrl = {
-      provider: providerId,
-      embedUrl,
-      iframeCode,
-      success: true
-    };
-
-    // Cache the result for 6 hours
-    await setProviderCache('embed', cacheKey, result, 21600);
-
-    return result;
-  }
-
-  async getSupportedProviders(): Promise<Provider[]> {
-    return this.providers.filter(p => p.enabled);
-  }
-
-  async checkProviderHealth(providerId: string): Promise<ProviderHealthStatus> {
-    const provider = this.providers.find(p => p.id === providerId);
-    if (!provider) {
-      throw new Error(`Provider ${providerId} not found`);
-    }
-
-    const startTime = Date.now();
-    let status: 'healthy' | 'unhealthy' | 'unknown' = 'unknown';
-    let responseTime: number | undefined;
-    let error: string | undefined;
-
+  constructor() {
+    // Initialize providers first
+    this.initializeProviders();
+    // Get Redis client if available, otherwise null
     try {
-      if (!provider.healthCheckUrl) {
-        throw new Error('No health check URL configured');
+      this.redisClient = getRedisClient();
+    } catch (error) {
+      console.warn('Redis client not available, rate limiting will be disabled');
+      this.redisClient = null;
+    }
+  }
+
+  private initializeProviders() {
+    // Initialize with vidnest provider only
+    this.providers.set('vidnest', {
+      id: 'vidnest',
+      name: 'Vidnest',
+      baseUrl: VIDNEST_BASE_URL,
+      enabled: true,
+      iframeTemplate: '<iframe src="{embedUrl}" frameBorder="0" scrolling="no" allowFullScreen></iframe>',
+      healthCheckUrl: VIDNEST_BASE_URL,
+      rateLimit: {
+        requests: 100,
+        windowMs: 60000 // 1 minute
+      },
+    });
+
+    logger.info('Provider service initialized with vidnest provider');
+  }
+
+  async getProviderEmbedUrl(provider: string, mediaId: string, mediaType: 'movie' | 'tv' = 'movie', season?: number, episode?: number): Promise<ProviderEmbedData> {
+    try {
+      const providerConfig = this.providers.get(provider);
+      if (!providerConfig) {
+        throw new NotFoundError(`Provider ${provider} not found`);
       }
 
-      const response = await axios.get(provider.healthCheckUrl, {
-        timeout: 10000,
-        validateStatus: (status: number) => status < 500
-      });
+      if (!providerConfig.enabled) {
+        throw new ProviderError(`Provider ${provider} is disabled`, provider);
+      }
 
-      responseTime = Date.now() - startTime;
-      
-      if (response.status >= 200 && response.status < 300) {
-        status = 'healthy';
+      // Validate mediaId
+      if (!mediaId || mediaId.trim() === '') {
+        throw new ValidationError('Media ID is required');
+      }
+
+      let embedUrl: string;
+
+      if (mediaType === 'movie') {
+        embedUrl = `${providerConfig.baseUrl}/movie/${mediaId}`;
+      } else if (mediaType === 'tv') {
+        if (!season || !episode) {
+          throw new ValidationError('Season and episode are required for TV shows');
+        }
+        if (season < 1 || episode < 1) {
+          throw new ValidationError('Season and episode must be positive numbers');
+        }
+        embedUrl = `${providerConfig.baseUrl}/tv/${mediaId}/${season}/${episode}`;
       } else {
-        status = 'unhealthy';
-        error = `HTTP ${response.status}`;
+        throw new ValidationError(`Invalid media type: ${mediaType}. Must be 'movie' or 'tv'`);
       }
-    } catch (err) {
-      responseTime = Date.now() - startTime;
-      status = 'unhealthy';
-      error = err instanceof Error ? err.message : 'Unknown error';
+
+      const iframeCode = providerConfig.iframeTemplate.replace('{embedUrl}', embedUrl);
+
+      return {
+        provider: providerConfig.id,
+        embedUrl,
+        iframeCode
+      };
+    } catch (error) {
+      logErrorWithDetails(error, {
+        context: 'Get provider embed URL',
+        provider,
+        mediaId,
+        mediaType,
+        season,
+        episode
+      });
+      throw error;
     }
-
-    const healthStatus: ProviderHealthStatus = {
-      provider: providerId,
-      status,
-      lastChecked: new Date(),
-      responseTime,
-      error: error || undefined
-    } as ProviderHealthStatus;
-
-    // Cache health status for 5 minutes
-    await setProviderCache('health', providerId, healthStatus, 300);
-
-    return healthStatus;
   }
 
-  async checkAllProvidersHealth(): Promise<ProviderHealthStatus[]> {
-    const healthChecks = this.providers.map(provider => 
-      this.checkProviderHealth(provider.id)
-    );
-    return Promise.all(healthChecks);
+  async getSupportedProviders(): Promise<ProviderConfig[]> {
+    return Array.from(this.providers.values()).filter(provider => provider.enabled);
   }
 
-  async getProviderStatus(providerId: string): Promise<ProviderHealthStatus> {
-    // Check cache first
-    const cached = await getProviderCache('health', providerId);
-    if (cached) {
-      return cached;
-    }
 
-    return this.checkProviderHealth(providerId);
-  }
+  async getProviderStats(): Promise<{
+    totalProviders: number;
+    enabledProviders: number;
+    disabledProviders: number;
+    providers: ProviderConfig[];
+  }> {
+    const allProviders = Array.from(this.providers.values());
+    const enabledProviders = allProviders.filter(p => p.enabled);
+    const disabledProviders = allProviders.filter(p => !p.enabled);
 
-  async getProviderStats(): Promise<any> {
-    const stats = {
-      totalProviders: this.providers.length,
-      enabledProviders: this.providers.filter(p => p.enabled).length,
-      disabledProviders: this.providers.filter(p => !p.enabled).length,
-      providersRequiringProxy: this.providers.filter(p => p.proxyRequired).length,
-      providers: this.providers.map(p => ({
-        id: p.id,
-        name: p.name,
-        enabled: p.enabled,
-        proxyRequired: p.proxyRequired,
-        rateLimit: p.rateLimit
-      }))
+    return {
+      totalProviders: allProviders.length,
+      enabledProviders: enabledProviders.length,
+      disabledProviders: disabledProviders.length,
+      providers: allProviders
     };
+  }
 
-    return stats;
+  // Rate limiting using Redis
+  async checkRateLimit(provider: string, userId: string): Promise<{ allowed: boolean; remaining: number; resetTime: number }> {
+    try {
+      // If Redis is not available, allow all requests
+      if (!this.redisClient) {
+        return { allowed: true, remaining: 100, resetTime: Date.now() + 60000 };
+      }
+
+      const providerConfig = this.providers.get(provider);
+      if (!providerConfig || !providerConfig.rateLimit) {
+        return { allowed: true, remaining: 100, resetTime: Date.now() + 60000 };
+      }
+
+      const { requests, windowMs } = providerConfig.rateLimit;
+      const key = `${RedisKeys.rateLimit}:${provider}:${userId}`;
+      const now = Date.now();
+      const windowStart = now - windowMs;
+
+      // Remove old requests
+      await this.redisClient.zRemRangeByScore(key, 0, windowStart);
+
+      // Add current request
+      await this.redisClient.zAdd(key, [{ score: now, value: now.toString() }]);
+      await this.redisClient.expire(key, Math.ceil(windowMs / 1000));
+
+      // Get current count
+      const currentCount = await this.redisClient.zCard(key);
+      const remaining = Math.max(0, requests - currentCount);
+
+      return {
+        allowed: currentCount <= requests,
+        remaining,
+        resetTime: now + windowMs
+      };
+    } catch (error) {
+      logger.error('Rate limit check failed:', error);
+      // Fallback to allow if Redis fails
+      return { allowed: true, remaining: 100, resetTime: Date.now() + 60000 };
+    }
+  }
+
+
+  async incrementRateLimit(provider: string, userId: string): Promise<void> {
+    try {
+      // If Redis is not available, do nothing
+      if (!this.redisClient) {
+        return;
+      }
+
+      const providerConfig = this.providers.get(provider);
+      if (!providerConfig || !providerConfig.rateLimit) {
+        return;
+      }
+
+      const { windowMs } = providerConfig.rateLimit;
+      const key = `${RedisKeys.rateLimit}:${provider}:${userId}`;
+      const now = Date.now();
+
+      await this.redisClient.zAdd(key, [{ score: now, value: now.toString() }]);
+      await this.redisClient.expire(key, Math.ceil(windowMs / 1000));
+    } catch (error) {
+      logger.error('Rate limit increment failed:', error);
+    }
   }
 }
 

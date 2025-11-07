@@ -4,9 +4,11 @@
   "description": "Production-ready backend microservice for streaming provider management and watch-together functionality",
   "main": "dist/server.js",
   "scripts": {
-    "dev": "dotenv -e .env ts-node-dev --respawn --transpile-only -- src/server.ts",
-    "build": "chmod +x node_modules/.bin/tsc && npx tsc",
+    "build": "tsc",
     "start": "node dist/server.js",
+    "dev": "ts-node-dev --respawn --transpile-only src/server.ts",
+    "test": "jest",
+    "test:watch": "jest --watch",
     "lint": "eslint src/**/*.ts",
     "lint:fix": "eslint src/**/*.ts --fix"
   },
@@ -45,7 +47,6 @@
     "providers",
     "microservice",
     "websocket",
-    "proxy-rotation",
     "watch-together"
   ],
   "author": "Your Name",

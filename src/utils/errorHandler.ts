@@ -10,6 +10,7 @@ export interface ApiError {
 export class AppError extends Error {
   public statusCode: number;
   public isOperational: boolean;
+  public details?: any;
 
   constructor(message: string, statusCode: number = 500) {
     super(message);
@@ -17,6 +18,79 @@ export class AppError extends Error {
     this.isOperational = true;
 
     Error.captureStackTrace(this, this.constructor);
+  }
+}
+
+// Specific error types for better error handling
+export class ValidationError extends AppError {
+  constructor(message: string, details?: any) {
+    super(message, 400);
+    this.name = 'ValidationError';
+  }
+}
+
+export class AuthenticationError extends AppError {
+  constructor(message: string = 'Authentication failed') {
+    super(message, 401);
+    this.name = 'AuthenticationError';
+  }
+}
+
+export class AuthorizationError extends AppError {
+  constructor(message: string = 'Insufficient permissions') {
+    super(message, 403);
+    this.name = 'AuthorizationError';
+  }
+}
+
+export class NotFoundError extends AppError {
+  constructor(message: string = 'Resource not found') {
+    super(message, 404);
+    this.name = 'NotFoundError';
+  }
+}
+
+export class ConflictError extends AppError {
+  constructor(message: string = 'Resource conflict') {
+    super(message, 409);
+    this.name = 'ConflictError';
+  }
+}
+
+export class RateLimitError extends AppError {
+  constructor(message: string = 'Rate limit exceeded') {
+    super(message, 429);
+    this.name = 'RateLimitError';
+  }
+}
+
+export class ExternalServiceError extends AppError {
+  constructor(message: string = 'External service error', service?: string) {
+    super(message, 502);
+    this.name = 'ExternalServiceError';
+    this.details = { service };
+  }
+}
+
+export class DatabaseError extends AppError {
+  constructor(message: string = 'Database error') {
+    super(message, 500);
+    this.name = 'DatabaseError';
+  }
+}
+
+export class RedisError extends AppError {
+  constructor(message: string = 'Redis error') {
+    super(message, 500);
+    this.name = 'RedisError';
+  }
+}
+
+export class ProviderError extends AppError {
+  constructor(message: string, provider?: string) {
+    super(message, 500);
+    this.name = 'ProviderError';
+    this.details = { provider };
   }
 }
 

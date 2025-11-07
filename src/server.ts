@@ -4,72 +4,42 @@ import helmet from '@fastify/helmet';
 import rateLimit from '@fastify/rate-limit';
 import { connectToRedis, getRedisClient } from './config/redis';
 import { validateEnvironment } from './config/environment';
-import { INTERNAL_API_KEY, CORS_ORIGIN, RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_MS, SWAGGER_HOST, PORT } from './config/environment';
 import { createSafeErrorResponse, logErrorWithDetails } from './utils/errorHandler';
 import { logger } from './utils/logger';
 import { Server } from 'socket.io';
 import { createAdapter } from '@socket.io/redis-adapter';
 import '@fastify/jwt';
+import dotenv from 'dotenv';
+import { getAppConfig } from './config/appConfig';
 
 // Import routes
 import providerRoutes from './routes/providers';
 import watchTogetherRoutes from './routes/watchTogether';
 
-// Load environment variables
+// Load environment variables from .env file
+dotenv.config();
 validateEnvironment();
 
-const fastify = Fastify({
-  logger: false, // We'll use our custom logger
-});
+const config = getAppConfig();
+const fastify = Fastify({ logger: false }); // We'll use our custom logger
 
 // Initialize JWT plugin
 fastify.register(require('@fastify/jwt'), {
   secret: process.env.JWT_SECRET!,
 });
 
-// Enable CORS for frontend interaction
-fastify.register(cors, {
-  origin: CORS_ORIGIN,
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'x-internal-key'],
-});
+fastify.register(cors, config.cors);
 
-// Add comprehensive security headers with Helmet
-fastify.register(helmet, {
-  contentSecurityPolicy: {
-    directives: {
-      defaultSrc: ["'self'"],
-      styleSrc: ["'self'", "'unsafe-inline'"],
-      scriptSrc: ["'self'"],
-      imgSrc: ["'self'", "data:", "https:"],
-      connectSrc: ["'self'", "https:", "wss:"],
-    },
-  },
-  hsts: {
-    maxAge: 31536000,
-    includeSubDomains: true,
-    preload: true,
-  },
-});
-
-// Add additional security headers
-fastify.addHook('onRequest', (request, reply) => {
-  reply.header('X-Content-Type-Options', 'nosniff');
-  reply.header('X-Frame-Options', 'DENY');
-  reply.header('X-XSS-Protection', '1; mode=block');
-  reply.header('Referrer-Policy', 'strict-origin-when-cross-origin');
-  reply.header('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
-});
+fastify.register(helmet, config.security.helmet);
 
 // Add rate limiting
 fastify.register(rateLimit, {
   global: true,
-  max: RATE_LIMIT_MAX_REQUESTS,
-  timeWindow: RATE_LIMIT_WINDOW_MS,
+  max: config.rateLimit.maxRequests,
+  timeWindow: config.rateLimit.windowMs,
   skip: (request: any) => {
     // Skip rate limiting for internal API calls
-    return request.headers['x-internal-key'] === INTERNAL_API_KEY;
+    return request.headers['x-internal-key'] === process.env.INTERNAL_API_KEY;
   },
   addHeaders: (request: any, reply: any, limit: any) => {
     reply.header('X-RateLimit-Limit', limit.max);
@@ -78,15 +48,15 @@ fastify.register(rateLimit, {
   }
 } as any);
 
-// Register Swagger
-fastify.register(import('@fastify/swagger'), {
+// Register Swagger plugins
+fastify.register(require('@fastify/swagger'), {
   swagger: {
     info: {
-      title: 'Providers Backend API',
-      description: 'API for streaming provider management and watch-together functionality',
-      version: '1.0.0',
+      title: config.swagger.title,
+      description: config.swagger.description,
+      version: config.swagger.version,
     },
-    host: SWAGGER_HOST,
+    host: config.swagger.host,
     schemes: ['https', 'http'],
     consumes: ['application/json'],
     produces: ['application/json'],
@@ -101,8 +71,7 @@ fastify.register(import('@fastify/swagger'), {
   },
 });
 
-// Register Swagger UI
-fastify.register(import('@fastify/swagger-ui'), {
+fastify.register(require('@fastify/swagger-ui'), {
   routePrefix: '/docs',
   uiConfig: {
     docExpansion: 'full',
@@ -113,12 +82,71 @@ fastify.register(import('@fastify/swagger-ui'), {
 });
 
 // Health check endpoint
-fastify.get('/health', async () => {
-  return { 
-    status: 'ok', 
+fastify.get('/health', (request, reply) => {
+  reply.send({
+    status: 'ok',
     timestamp: new Date().toISOString(),
-    service: 'providers-backend'
+    service: 'providers-backend',
+    message: 'Server is running'
+  });
+});
+
+// Test endpoint
+fastify.get('/test', (request, reply) => {
+  reply.send({ message: 'Test successful' });
+});
+
+// Security status endpoint
+fastify.get('/security/status', async () => {
+  const { getSecurityStatus } = await import('./config/environment');
+  
+  return {
+    timestamp: new Date().toISOString(),
+    security: {
+      ...getSecurityStatus(),
+      csrfProtectionEnabled: process.env.CSRF_PROTECTION_ENABLED === 'true',
+      sslEnforcementEnabled: process.env.SSL_ENFORCEMENT_ENABLED !== 'false',
+      sessionManagement: {
+        timeout: getSecurityStatus().sessionTimeout,
+        rotationInterval: getSecurityStatus().tokenRotationInterval,
+        maxRotations: process.env.MAX_TOKEN_ROTATIONS || '5'
+      }
+    },
+    environment: {
+      nodeEnv: process.env.NODE_ENV || 'development',
+      isProduction: process.env.NODE_ENV === 'production'
+    }
   };
+});
+
+// CSRF token endpoint
+fastify.get('/csrf-token', {
+  preHandler: [async (request, reply) => {
+    // Add CSRF protection logic here
+  }]
+}, async (request, reply) => {
+  return {
+    csrfToken: 'csrf-token-placeholder',
+    timestamp: new Date().toISOString()
+  };
+});
+
+// API configuration endpoint
+fastify.get('/api/config', async () => {
+  return {
+    websocketUrl: process.env.WEBSOCKET_URL || `ws://${process.env.RAILWAY_PUBLIC_DOMAIN || 'localhost:3001'}`,
+    apiBaseUrl: process.env.RAILWAY_PUBLIC_DOMAIN || `localhost:3001`,
+    features: {
+      watchTogether: true,
+      providers: true,
+      webSocket: true
+    },
+    timestamp: new Date().toISOString()
+  };
+});
+
+fastify.get('/', async () => {
+  return { message: 'Welcome to Providers Backend!' };
 });
 
 // Register routes
@@ -131,29 +159,45 @@ const start = async () => {
     await connectToRedis();
     logger.info('Connected to Redis successfully');
     
-    // Set up Socket.IO with Redis adapter
+    // Set up Socket.IO
     const io = new Server(fastify.server, {
       cors: {
-        origin: CORS_ORIGIN,
+        origin: config.cors.origin,
         methods: ['GET', 'POST'],
         credentials: true
       }
     });
     
-    // Set up Redis adapter for Socket.IO
-    const pubClient = getRedisClient();
-    const subClient = pubClient.duplicate();
-    const redisAdapter = createAdapter(pubClient, subClient);
-    io.adapter(redisAdapter);
+    // For in-memory Redis, we'll use a simple in-memory adapter
+    // If we need Redis adapter later, we can implement a custom one
+    logger.info('Using in-memory adapter for Socket.IO (Redis adapter requires real Redis client)');
     
     // Attach Socket.IO instance to Fastify for use in routes
     (fastify as any).io = io;
     
-    // Then start the server
-    await fastify.listen({ port: PORT, host: '0.0.0.0' });
-    logger.info(`Providers Backend listening on http://0.0.0.0:${PORT}`);
-    logger.info(`Swagger docs available at http://0.0.0.0:${PORT}/docs`);
-    logger.info('WebSocket server ready for connections');
+    // Start the server
+    try {
+      await fastify.listen({ port: config.port, host: config.host });
+      logger.info(`Providers Backend listening on http://${config.host}:${config.port}`);
+      logger.info(`Swagger docs available at http://${config.host}:${config.port}/docs`);
+      logger.info('WebSocket server ready for connections');
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('EADDRINUSE')) {
+        logger.warn(`Port ${config.port} is already in use, trying alternative port ${config.port + 1}`);
+        try {
+          await fastify.listen({ port: config.port + 1, host: config.host });
+          logger.info(`Providers Backend listening on http://${config.host}:${config.port + 1}`);
+          logger.info(`Swagger docs available at http://${config.host}:${config.port + 1}/docs`);
+          logger.info('WebSocket server ready for connections');
+        } catch (altError) {
+          logger.error('Failed to start server on alternative port:', altError instanceof Error ? altError.message : String(altError));
+          process.exit(1);
+        }
+      } else {
+        logger.error('Failed to start server:', error instanceof Error ? error.message : String(error));
+        process.exit(1);
+      }
+    }
   } catch (err) {
     logErrorWithDetails(err, { context: 'Server startup' });
     logger.error('Failed to start server');
@@ -179,17 +223,7 @@ fastify.setNotFoundHandler((request, reply) => {
   reply.code(safeError.statusCode).send(safeError);
 });
 
-// Add security-focused request logging
-fastify.addHook('onRequest', (request, reply) => {
-  logger.http({
-    method: request.method,
-    url: request.url,
-    ip: request.ip,
-    userAgent: request.headers['user-agent'],
-    timestamp: new Date().toISOString(),
-    contentType: request.headers['content-type'],
-    contentLength: request.headers['content-length'],
-  });
-});
+// Request logging disabled to prevent hanging issues in production
+// Alternative: Use middleware that doesn't interfere with request lifecycle
 
 start();
