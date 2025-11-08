@@ -24,17 +24,75 @@ export interface ProviderConfig {
 
 export class ProviderService {
   private providers: Map<string, ProviderConfig> = new Map();
-  private redisClient: any;
+  private redisClient: any = null;
+  private redisInitialized = false;
+  private initializingPromise: Promise<void> | null = null;
 
   constructor() {
     // Initialize providers first
     this.initializeProviders();
-    // Get Redis client if available, otherwise null
+  }
+
+  private async ensureRedisClient(): Promise<any> {
+    // If already initialized, return the client
+    if (this.redisInitialized) {
+      return this.redisClient;
+    }
+
+    // If currently initializing, wait for it to complete
+    if (this.initializingPromise) {
+      try {
+        await this.initializingPromise;
+      } catch (error) {
+        logger.warn('Redis initialization failed, using in-memory fallback:', error);
+        this.redisClient = null;
+        this.redisInitialized = true;
+      }
+      return this.redisClient;
+    }
+
+    // Start initialization with a timeout
+    this.initializingPromise = new Promise<void>(async (resolve) => {
+      try {
+        // Set a timeout to avoid hanging
+        const timeoutId = setTimeout(() => {
+          logger.warn('Redis initialization timeout, using in-memory fallback');
+          this.redisClient = null;
+          this.redisInitialized = true;
+          resolve();
+        }, 5000); // 5 second timeout
+
+        // Try to initialize Redis
+        this.redisClient = await this.initializeRedisInternal();
+        clearTimeout(timeoutId);
+        this.redisInitialized = true;
+        resolve();
+      } catch (error) {
+        logger.warn('Redis initialization failed, using in-memory fallback:', error);
+        this.redisClient = null;
+        this.redisInitialized = true;
+        resolve();
+      }
+    });
+    
     try {
-      this.redisClient = getRedisClient();
+      await this.initializingPromise;
+    } finally {
+      this.initializingPromise = null;
+    }
+    
+    return this.redisClient;
+  }
+
+  private async initializeRedisInternal(): Promise<void> {
+    try {
+      this.redisClient = await getRedisClient();
+      this.redisInitialized = true;
+      logger.info('Redis client initialized for provider service');
     } catch (error) {
-      console.warn('Redis client not available, rate limiting will be disabled');
+      logger.warn('Redis client not available, rate limiting will be disabled');
       this.redisClient = null;
+      this.redisInitialized = true; // Mark as initialized even if failed
     }
   }
 
@@ -109,9 +167,15 @@ export class ProviderService {
   }
 
   async getSupportedProviders(): Promise<ProviderConfig[]> {
-    return Array.from(this.providers.values()).filter(provider => provider.enabled);
+    try {
+      const providers = Array.from(this.providers.values()).filter(provider => provider.enabled);
+      logger.info(`getSupportedProviders: returning ${providers.length} providers`);
+      return providers;
+    } catch (error) {
+      logger.error('Error in getSupportedProviders:', error);
+      throw error;
+    }
   }
-
 
   async getProviderStats(): Promise<{
     totalProviders: number;
@@ -134,8 +198,11 @@ export class ProviderService {
   // Rate limiting using Redis
   async checkRateLimit(provider: string, userId: string): Promise<{ allowed: boolean; remaining: number; resetTime: number }> {
     try {
+      // Ensure Redis client is ready
+      const client = await this.ensureRedisClient();
+      
       // If Redis is not available, allow all requests
-      if (!this.redisClient) {
+      if (!client) {
         return { allowed: true, remaining: 100, resetTime: Date.now() + 60000 };
       }
 
@@ -150,14 +217,14 @@ export class ProviderService {
       const windowStart = now - windowMs;
 
       // Remove old requests
-      await this.redisClient.zRemRangeByScore(key, 0, windowStart);
+      await client.zRemRangeByScore(key, 0, windowStart);
 
       // Add current request
-      await this.redisClient.zAdd(key, [{ score: now, value: now.toString() }]);
-      await this.redisClient.expire(key, Math.ceil(windowMs / 1000));
+      await client.zAdd(key, [{ score: now, value: now.toString() }]);
+      await client.expire(key, Math.ceil(windowMs / 1000));
 
       // Get current count
-      const currentCount = await this.redisClient.zCard(key);
+      const currentCount = await client.zCard(key);
       const remaining = Math.max(0, requests - currentCount);
 
       return {
@@ -172,11 +239,13 @@ export class ProviderService {
     }
   }
 
-
   async incrementRateLimit(provider: string, userId: string): Promise<void> {
     try {
+      // Ensure Redis client is ready
+      const client = await this.ensureRedisClient();
+      
       // If Redis is not available, do nothing
-      if (!this.redisClient) {
+      if (!client) {
         return;
       }
 
@@ -189,8 +258,8 @@ export class ProviderService {
       const key = `${RedisKeys.rateLimit}:${provider}:${userId}`;
       const now = Date.now();
 
-      await this.redisClient.zAdd(key, [{ score: now, value: now.toString() }]);
-      await this.redisClient.expire(key, Math.ceil(windowMs / 1000));
+      await client.zAdd(key, [{ score: now, value: now.toString() }]);
+      await client.expire(key, Math.ceil(windowMs / 1000));
     } catch (error) {
       logger.error('Rate limit increment failed:', error);
     }

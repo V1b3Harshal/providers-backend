@@ -11,6 +11,7 @@ import { createAdapter } from '@socket.io/redis-adapter';
 import '@fastify/jwt';
 import dotenv from 'dotenv';
 import { getAppConfig } from './config/appConfig';
+import { providerService } from './services/providerService';
 
 // Import routes
 import providerRoutes from './routes/providers';
@@ -32,12 +33,11 @@ fastify.register(cors, config.cors);
 
 fastify.register(helmet, config.security.helmet);
 
-// Add rate limiting
 fastify.register(rateLimit, {
   global: true,
   max: config.rateLimit.maxRequests,
   timeWindow: config.rateLimit.windowMs,
-  skip: (request: any) => {
+  skip: async (request: any) => {
     // Skip rate limiting for internal API calls
     return request.headers['x-internal-key'] === process.env.INTERNAL_API_KEY;
   },
@@ -45,6 +45,11 @@ fastify.register(rateLimit, {
     reply.header('X-RateLimit-Limit', limit.max);
     reply.header('X-RateLimit-Remaining', limit.remaining);
     reply.header('X-RateLimit-Reset', limit.resetTime);
+  },
+  ban: 0,
+  allowList: (request: any, key: string) => {
+    // Allow all requests with internal key
+    return request.headers['x-internal-key'] === process.env.INTERNAL_API_KEY;
   }
 } as any);
 

@@ -3,6 +3,7 @@ import { providerService } from '../services/providerService';
 import { internalAuth } from '../middleware/internalAuth';
 import { sanitizeId, sanitizeString } from '../utils/sanitizer';
 import { createSafeErrorResponse, logErrorWithDetails, ValidationError, NotFoundError, RateLimitError } from '../utils/errorHandler';
+import { logger } from '../utils/logger';
 
 const providersRoutes: FastifyPluginAsync = async (fastify) => {
   // Get provider embed URL - requires internal authentication
@@ -89,66 +90,14 @@ const providersRoutes: FastifyPluginAsync = async (fastify) => {
   });
 
   // Get supported providers list - requires internal authentication
-  fastify.get('/list', { 
-    preHandler: [internalAuth],
-    schema: {
-      response: {
-        200: {
-          type: 'object',
-          required: ['success', 'data'],
-          properties: {
-            success: { type: 'boolean' },
-            data: {
-              type: 'array',
-              items: {
-                type: 'object',
-                required: ['id', 'name', 'baseUrl', 'enabled', 'iframeTemplate'],
-                properties: {
-                  id: { type: 'string' },
-                  name: { type: 'string' },
-                  baseUrl: { type: 'string' },
-                  iframeTemplate: { type: 'string' },
-                  enabled: { type: 'boolean' },
-                  healthCheckUrl: { type: 'string' },
-                  rateLimit: {
-                    type: 'object',
-                    properties: {
-                      requests: { type: 'number' },
-                      windowMs: { type: 'number' }
-                    }
-                  },
-                }
-              }
-            }
-          }
-        },
-        401: {
-          type: 'object',
-          required: ['statusCode', 'error', 'message'],
-          properties: {
-            statusCode: { type: 'number' },
-            error: { type: 'string' },
-            message: { type: 'string' }
-          }
-        },
-        500: {
-          type: 'object',
-          required: ['statusCode', 'error', 'message'],
-          properties: {
-            statusCode: { type: 'number' },
-            error: { type: 'string' },
-            message: { type: 'string' }
-          }
-        }
-      }
-    }
+  fastify.get('/list', {
+    preHandler: [internalAuth]
   }, async (request, reply) => {
     try {
       const providers = await providerService.getSupportedProviders();
       return { success: true, data: providers };
     } catch (error) {
       logErrorWithDetails(error, { context: 'Get providers list' });
-      
       const safeError = createSafeErrorResponse(error);
       return reply.code(safeError.statusCode as any).send(safeError);
     }

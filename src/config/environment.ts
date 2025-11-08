@@ -5,7 +5,7 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 export const validateEnvironment = () => {
-  const required = ['INTERNAL_API_KEY', 'REDIS_URL', 'TMDB_API_KEY', 'JWT_SECRET'];
+  const required = ['INTERNAL_API_KEY', 'TMDB_API_KEY', 'JWT_SECRET'];
   const missing = required.filter(envVar => !env[envVar]);
   
   if (missing.length > 0) {
