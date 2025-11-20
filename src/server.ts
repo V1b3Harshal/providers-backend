@@ -13,6 +13,7 @@ import { initSentry } from './config/sentry';
 import { initPostHog } from './config/posthog';
 import { initSupabase } from './config/supabase';
 import { initOneSignal } from './config/onesignal';
+import betterUptimeService from './config/betterUptime';
 import userRateLimitService from './services/userRateLimitService';
 
 // Import routes
@@ -164,7 +165,8 @@ fastify.get('/health', async (request, reply) => {
     services: {
       supabase: supabaseHealth.status,
       redis: redisHealth.status,
-      oneSignal: oneSignalService.getStatus()
+      oneSignal: oneSignalService.getStatus(),
+      betterUptime: betterUptimeService.getStatus()
     }
   });
 });
@@ -274,6 +276,8 @@ const start = async () => {
     // Initialize PostHog
     initPostHog();
 
+    // Initialize Better Uptime
+    betterUptimeService.init();
 
     logger.info('All third-party services initialized');
     
