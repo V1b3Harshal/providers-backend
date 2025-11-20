@@ -4,6 +4,7 @@ import { internalAuth } from '../middleware/internalAuth';
 import { sanitizeId, sanitizeString } from '../utils/sanitizer';
 import { createSafeErrorResponse, logErrorWithDetails, ValidationError, NotFoundError, RateLimitError } from '../utils/errorHandler';
 import { logger } from '../utils/logger';
+import { trackEvent } from '../config/posthog';
 
 const providersRoutes: FastifyPluginAsync = async (fastify) => {
   // Get provider embed URL - requires internal authentication
@@ -75,9 +76,30 @@ const providersRoutes: FastifyPluginAsync = async (fastify) => {
         throw new ValidationError('Invalid provider or ID format');
       }
 
+      // Track provider embed request
+      await trackEvent('provider_embed_request', {
+        provider: sanitizedProvider,
+        id: sanitizedId,
+        ip: request.ip
+      });
+
       const embedData = await providerService.getProviderEmbedUrl(sanitizedProvider, sanitizedId);
+
+      // Track successful embed generation
+      await trackEvent('provider_embed_success', {
+        provider: sanitizedProvider,
+        id: sanitizedId
+      });
+
       return { success: true, data: embedData };
     } catch (error) {
+      // Track failed embed request
+      await trackEvent('provider_embed_error', {
+        provider: (request.params as any).provider,
+        id: (request.params as any).id,
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
+
       logErrorWithDetails(error, {
         context: 'Get provider embed URL',
         provider: (request.params as any).provider,
@@ -94,9 +116,25 @@ const providersRoutes: FastifyPluginAsync = async (fastify) => {
     preHandler: [internalAuth]
   }, async (request, reply) => {
     try {
+      // Track provider list request
+      await trackEvent('provider_list_request', {
+        ip: request.ip
+      });
+
       const providers = await providerService.getSupportedProviders();
+
+      // Track successful provider list retrieval
+      await trackEvent('provider_list_success', {
+        providerCount: providers.length
+      });
+
       return { success: true, data: providers };
     } catch (error) {
+      // Track failed provider list request
+      await trackEvent('provider_list_error', {
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
+
       logErrorWithDetails(error, { context: 'Get providers list' });
       const safeError = createSafeErrorResponse(error);
       return reply.code(safeError.statusCode as any).send(safeError);
@@ -164,9 +202,26 @@ const providersRoutes: FastifyPluginAsync = async (fastify) => {
     }
   }, async (request, reply) => {
     try {
+      // Track provider stats request
+      await trackEvent('provider_stats_request', {
+        ip: request.ip
+      });
+
       const stats = await providerService.getProviderStats();
+
+      // Track successful stats retrieval
+      await trackEvent('provider_stats_success', {
+        totalProviders: stats.totalProviders,
+        enabledProviders: stats.enabledProviders
+      });
+
       return { success: true, data: stats };
     } catch (error) {
+      // Track failed provider stats request
+      await trackEvent('provider_stats_error', {
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
+
       logErrorWithDetails(error, { context: 'Get provider statistics' });
       
       const safeError = createSafeErrorResponse(error);

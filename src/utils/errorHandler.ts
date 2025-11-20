@@ -1,4 +1,5 @@
 import { NODE_ENV } from '../config/environment';
+import { Sentry } from '../config/sentry';
 
 export interface ApiError {
   statusCode: number;
@@ -139,6 +140,21 @@ export const logErrorWithDetails = (error: any, context: any = {}) => {
     }
   };
 
+  // Track error with monitoring service
+  import('../services/errorMonitoringService').then(({ errorMonitoringService }) => {
+    errorMonitoringService.trackError(error, context);
+  }).catch(err => {
+    console.error('Failed to load error monitoring service:', err);
+  });
+
+  // Capture error in Sentry
+  if (error instanceof Error) {
+    Sentry.captureException(error);
+  } else {
+    Sentry.captureMessage('Unknown error type');
+  }
+
+  // Log to console as fallback
   if (error instanceof Error) {
     console.error('Error occurred:', errorDetails);
   } else {

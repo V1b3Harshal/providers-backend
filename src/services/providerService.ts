@@ -2,6 +2,8 @@ import { createSafeErrorResponse, logErrorWithDetails, ValidationError, NotFound
 import { logger } from '../utils/logger';
 import { getRedisClient, RedisKeys } from '../config/redis';
 import { TMDB_API_KEY, TMDB_API_URL, VIDNEST_BASE_URL } from '../config/environment';
+import * as Sentry from '@sentry/node';
+import { trackProviderRequest, trackProviderStatus, trackError } from '../config/posthog';
 
 export interface ProviderEmbedData {
   provider: string;
@@ -115,6 +117,8 @@ export class ProviderService {
   }
 
   async getProviderEmbedUrl(provider: string, mediaId: string, mediaType: 'movie' | 'tv' = 'movie', season?: number, episode?: number): Promise<ProviderEmbedData> {
+    const startTime = Date.now();
+
     try {
       const providerConfig = this.providers.get(provider);
       if (!providerConfig) {
@@ -148,12 +152,45 @@ export class ProviderService {
 
       const iframeCode = providerConfig.iframeTemplate.replace('{embedUrl}', embedUrl);
 
+      const responseTime = Date.now() - startTime;
+
+      // Track successful provider request
+      await trackProviderRequest(provider, responseTime, true);
+
       return {
         provider: providerConfig.id,
         embedUrl,
         iframeCode
       };
     } catch (error) {
+      const responseTime = Date.now() - startTime;
+
+      // Track failed provider request
+      await trackProviderRequest(provider, responseTime, false, error instanceof Error ? error.message : 'Unknown error');
+
+      // Track error in PostHog
+      await trackError(
+        error instanceof Error ? error.message : 'Unknown provider error',
+        'getProviderEmbedUrl',
+        undefined,
+        { provider, mediaId, mediaType, season, episode }
+      );
+
+      // Send error to Sentry
+      Sentry.captureException(error, {
+        tags: {
+          service: 'providers-backend',
+          provider,
+          mediaType
+        },
+        extra: {
+          mediaId,
+          season,
+          episode,
+          responseTime
+        }
+      });
+
       logErrorWithDetails(error, {
         context: 'Get provider embed URL',
         provider,

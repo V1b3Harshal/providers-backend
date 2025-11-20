@@ -23,8 +23,10 @@ import {
 } from '../config/redis';
 import { v4 as uuidv4 } from 'uuid';
 import { logger } from '../utils/logger';
-import jwt from 'jsonwebtoken';
-import { JWT_SECRET } from '../config/environment';
+import { validateSupabaseToken } from '../config/supabase';
+import { notificationService } from './notificationService';
+import { trackWatchTogetherEvent, trackWebSocketConnection, trackError, trackUserAction } from '../config/posthog';
+import * as Sentry from '@sentry/node';
 
 export class WatchTogetherService {
   private io: Server;
@@ -42,16 +44,46 @@ export class WatchTogetherService {
     this.io.on('connection', (socket: Socket) => {
       logger.info(`User connected: ${socket.id}`);
 
-      // Simplified WebSocket authentication
-      socket.on('authenticate', (data: { token: string }, callback: any) => {
+      // Track WebSocket connection
+      trackWebSocketConnection('connected').catch(error => {
+        logger.warn('Failed to track WebSocket connection:', error);
+      });
+
+      // Supabase WebSocket authentication
+      socket.on('authenticate', async (data: { token: string }, callback: any) => {
         try {
-          const decoded = jwt.verify(data.token, JWT_SECRET) as any;
-          socket.data.userId = decoded.userId;
-          socket.data.isAdmin = decoded.isAdmin || false;
-          logger.info(`User ${decoded.userId} authenticated for WebSocket`);
-          callback({ success: true, isAdmin: decoded.isAdmin || false });
+          const user = await validateSupabaseToken(data.token);
+          socket.data.userId = user.id;
+          socket.data.isAdmin = false; // Default to false, can be enhanced later
+          logger.info(`User ${user.id} authenticated for WebSocket via Supabase`);
+
+          // Track successful authentication
+          await trackUserAction('websocket_authenticated', user.id, {
+            socketId: socket.id,
+            timestamp: new Date().toISOString()
+          });
+
+          callback({ success: true, isAdmin: false });
         } catch (error) {
           logger.error('WebSocket authentication failed:', error);
+
+          // Track authentication failure
+          await trackError('WebSocket authentication failed', 'websocket_auth', undefined, {
+            socketId: socket.id,
+            error: error instanceof Error ? error.message : 'Unknown error'
+          });
+
+          // Send error to Sentry
+          Sentry.captureException(error, {
+            tags: {
+              service: 'providers-backend',
+              event: 'websocket_auth_failed'
+            },
+            extra: {
+              socketId: socket.id
+            }
+          });
+
           callback({ success: false, error: 'Authentication failed' });
         }
       });
@@ -59,10 +91,10 @@ export class WatchTogetherService {
       socket.on('create_room', async (data, callback) => {
         try {
           const { name, mediaId, mediaType, providerId, token, isPublic = true, maxParticipants = 10 } = data;
-          
-          // Verify JWT token
-          const decoded = jwt.verify(token, JWT_SECRET) as any;
-          const adminId = decoded.userId;
+
+          // Verify Supabase token
+          const user = await validateSupabaseToken(token);
+          const adminId = user.id;
           
           const roomId = uuidv4();
           const shareableLink = isPublic ? `${process.env.FRONTEND_URL || 'http://localhost:3000'}/watch-together/${roomId}` : null;
@@ -70,22 +102,29 @@ export class WatchTogetherService {
           const room: WatchTogetherRoom = {
             id: roomId,
             name,
+            hostId: adminId,
             adminId,
             mediaId,
             mediaType,
             providerId: providerId || 'vidnest',
             participants: [adminId],
             currentState: {
-              isPlaying: false,
-              currentTime: 0,
-              duration: 0,
-              playbackRate: 1,
-              currentEpisode: 1,
-              providerUrl: this.generateProviderUrl(providerId || 'vidnest', mediaId)
+              playbackState: {
+                isPlaying: false,
+                currentTime: 0,
+                volume: 1
+              },
+              timestamp: Date.now()
             },
             isPublic,
-            shareableLink: shareableLink || null,
+            ...(shareableLink && { shareableLink }),
             maxParticipants,
+            settings: {
+              autoPlay: true,
+              allowChat: true,
+              maxParticipants: maxParticipants
+            },
+            expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000), // 24 hours
             createdAt: new Date(),
             updatedAt: new Date()
           };
@@ -109,16 +148,46 @@ export class WatchTogetherService {
           multi.expire(RedisKeys.activeRooms, 86400);
           
           await multi.exec();
-          
+
           socket.join(roomId);
           socket.data.roomId = roomId;
           socket.data.userId = adminId;
           socket.data.isAdmin = true;
 
+          // Track room creation
+          await trackWatchTogetherEvent('room_created', roomId, adminId, {
+            providerId,
+            mediaType,
+            isPublic,
+            maxParticipants
+          });
+
           this.io.to(roomId).emit('room_created', room);
           callback({ success: true, roomId, room, shareableLink });
         } catch (error) {
           logger.error('Error creating room:', error);
+
+          // Track room creation error
+          await trackError('Failed to create room', 'create_room', undefined, {
+            mediaId: data.mediaId,
+            mediaType: data.mediaType,
+            providerId: data.providerId,
+            error: error instanceof Error ? error.message : 'Unknown error'
+          });
+
+          // Send error to Sentry
+          Sentry.captureException(error, {
+            tags: {
+              service: 'providers-backend',
+              event: 'room_creation_failed'
+            },
+            extra: {
+              mediaId: data.mediaId,
+              mediaType: data.mediaType,
+              providerId: data.providerId
+            }
+          });
+
           callback({ success: false, error: 'Failed to create room' });
         }
       });
@@ -126,15 +195,15 @@ export class WatchTogetherService {
       socket.on('join_room', async (data, callback) => {
         try {
           const { roomId, token, shareableLink } = data;
-          
-          // Verify JWT token
-          const decoded = jwt.verify(token, JWT_SECRET) as any;
-          const userId = decoded.userId;
+
+          // Verify Supabase token
+          const user = await validateSupabaseToken(token);
+          const userId = user.id;
 
           const room = await getRoom(roomId);
           
           // Validate shareable link if provided
-          if (shareableLink && room.shareableLink !== shareableLink) {
+          if (shareableLink && room?.shareableLink !== shareableLink) {
             callback({ success: false, error: 'Invalid shareable link' });
             return;
           }
@@ -148,7 +217,7 @@ export class WatchTogetherService {
             return;
           }
 
-          if (room.participants.length >= room.maxParticipants) {
+          if (room.participants.length >= (room.maxParticipants || 10)) {
             callback({ success: false, error: 'Room is full' });
             return;
           }
@@ -174,6 +243,16 @@ export class WatchTogetherService {
             participants: room.participants,
             isAdmin: false
           });
+
+          // Track user joining room
+          await trackWatchTogetherEvent('user_joined', roomId, userId, {
+            participantCount: room.participants.length,
+            maxParticipants: room.maxParticipants
+          });
+
+          // Send push notification to other participants
+          notificationService.notifyUserJoinedRoom(roomId, userId, 'User', room.participants.filter(id => id !== userId));
+
           callback({ success: true, room });
         } catch (error) {
           logger.error('Error joining room:', error);
@@ -202,7 +281,7 @@ export class WatchTogetherService {
           // If admin leaves, transfer admin to another participant
           if (room.adminId === userId && room.participants.length > 0) {
             const newAdmin = room.participants[0];
-            room.adminId = newAdmin;
+            (room as any).adminId = newAdmin;
             
             this.io.to(roomId).emit('admin_changed', {
               newAdmin,
@@ -283,7 +362,7 @@ export class WatchTogetherService {
               broadcastEvent = 'episode_changed';
               break;
             case 'changeProvider':
-              stateUpdate.providerUrl = this.generateProviderUrl(action.data.provider, room.mediaId);
+              stateUpdate.providerUrl = this.generateProviderUrl(action.data.provider, room.mediaId || '');
               stateUpdate.currentTime = 0;
               broadcastEvent = 'provider_changed';
               break;
@@ -291,12 +370,12 @@ export class WatchTogetherService {
               stateUpdate.mediaId = action.data.mediaId;
               stateUpdate.currentEpisode = 1;
               stateUpdate.currentTime = 0;
-              stateUpdate.providerUrl = this.generateProviderUrl(room.providerId, action.data.mediaId);
+              stateUpdate.providerUrl = this.generateProviderUrl(room.providerId || '', action.data.mediaId || '');
               broadcastEvent = 'media_changed';
               break;
             case 'fastForward':
             case 'rewind':
-              const currentTime = room.currentState.currentTime || 0;
+              const currentTime = room.currentState?.playbackState?.currentTime || 0;
               const skipAmount = action.data.skipAmount || 120;
               const newTime = action.type === 'fastForward' ?
                 currentTime + skipAmount :
@@ -310,8 +389,19 @@ export class WatchTogetherService {
           room.currentState = { ...room.currentState, ...stateUpdate };
           room.updatedAt = new Date();
 
-          await setRoom(roomId, room);
-          await setRoomState(roomId, room.currentState);
+          await setRoom(room);
+          await setRoomState({
+            roomId,
+            currentVideo: room.currentVideo || {
+              id: '',
+              title: '',
+              provider: '',
+              timestamp: Date.now(),
+              duration: 0
+            },
+            playbackState: room.currentState?.playbackState || { isPlaying: false, currentTime: 0, volume: 1 },
+            lastUpdate: new Date()
+          });
 
           this.io.to(roomId).emit(broadcastEvent, {
             action,
@@ -321,6 +411,11 @@ export class WatchTogetherService {
             timestamp: room.updatedAt,
             roomId
           });
+
+          // Send push notification for admin actions
+          if (isAdmin) {
+            notificationService.notifyAdminAction(roomId, 'Admin', action.type, room.participants);
+          }
 
           logger.info(`Admin ${userId} performed ${action.type} action in room ${roomId}`);
         } catch (error) {
@@ -416,7 +511,7 @@ export class WatchTogetherService {
           }
 
           // Check if room has space
-          if (room.participants.length >= room.maxParticipants) {
+          if (room.participants.length >= (room.maxParticipants || 10)) {
             callback({ success: false, error: 'Room is full' });
             return;
           }
@@ -471,6 +566,9 @@ export class WatchTogetherService {
               } else {
                 // If regular user leaves, notify remaining participants
                 this.io.to(roomId).emit('user_left', { userId, participants: room.participants });
+ 
+                // Send push notification to remaining participants
+                notificationService.notifyUserLeftRoom(roomId, userId, 'User', room.participants);
               }
             }
           }
@@ -495,7 +593,7 @@ export class WatchTogetherService {
       try {
         // Use optimized cleanup for inactive rooms first
         const cleanedInactive = await cleanupInactiveRooms();
-        if (cleanedInactive > 0) {
+        if (cleanedInactive.cleaned > 0) {
           logger.info(`Cleaned up ${cleanedInactive} inactive rooms`);
         }
         
@@ -511,11 +609,11 @@ export class WatchTogetherService {
   }
 
   async getRoom(roomId: string): Promise<WatchTogetherRoom | null> {
-    return await getRoom(roomId);
+    return await getRoom(roomId) as WatchTogetherRoom;
   }
 
   async getRoomParticipants(roomId: string): Promise<string[]> {
-    return await getRoomParticipants(roomId);
+    return (await getRoomParticipants(roomId)).map(p => p.userId);
   }
 
   async getRoomState(roomId: string): Promise<any> {
@@ -529,7 +627,7 @@ export class WatchTogetherService {
     for (const roomId of activeRoomIds) {
       const room = await getRoom(roomId);
       if (room) {
-        rooms.push(room);
+        rooms.push(room as WatchTogetherRoom);
       }
     }
     
@@ -578,12 +676,22 @@ export class WatchTogetherService {
       totalPages: number;
     };
   }> {
-    return await getRoomsWithPagination(page, limit);
+    const result = await getRoomsWithPagination(page, limit);
+    return {
+      ...result,
+      rooms: result.rooms.map(room => ({ ...room, isPublic: room.isPublic ?? true } as WatchTogetherRoom)),
+      pagination: {
+        page,
+        limit,
+        total: result.total,
+        totalPages: Math.ceil(result.total / limit)
+      }
+    };
   }
 
   // Batch renew TTL for multiple rooms (optimized)
   async batchRenewRoomTTLs(roomIds: string[], ttl: number = 3600): Promise<void> {
-    await batchRenewRoomTTLs(roomIds, ttl);
+    await batchRenewRoomTTLs(roomIds.map(id => ({ id, expiresAt: new Date(Date.now() + ttl * 1000) })), ttl);
   }
 
   async broadcastToRoom(roomId: string, event: string, data: any): Promise<void> {
@@ -645,7 +753,7 @@ export class WatchTogetherService {
       // If kicking the admin, transfer to someone else
       if (room.adminId === userIdToKick && room.participants.length > 0) {
         const newAdmin = room.participants[0];
-        room.adminId = newAdmin;
+        (room as any).adminId = newAdmin;
         
         this.io.to(roomId).emit('admin_changed', {
           newAdmin,
@@ -685,21 +793,29 @@ export class WatchTogetherService {
     const room: WatchTogetherRoom = {
       id: roomId,
       name: roomData.name,
+      hostId: roomData.adminId,
       adminId: roomData.adminId,
       mediaId: roomData.mediaId,
       mediaType: roomData.mediaType,
       providerId: roomData.providerId || 'vidnest',
       participants: [roomData.adminId],
       currentState: {
-        isPlaying: false,
-        currentTime: 0,
-        duration: 0,
-        playbackRate: 1,
-        providerUrl: this.generateProviderUrl(roomData.providerId || 'vidnest', roomData.mediaId)
+        playbackState: {
+          isPlaying: false,
+          currentTime: 0,
+          volume: 1
+        },
+        timestamp: Date.now()
       },
       isPublic,
-      shareableLink: shareableLink || null,
+      ...(shareableLink && { shareableLink }),
       maxParticipants,
+      settings: {
+        autoPlay: true,
+        allowChat: true,
+        maxParticipants: maxParticipants
+      },
+      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
       createdAt: new Date(),
       updatedAt: new Date()
     };
@@ -754,11 +870,27 @@ export class WatchTogetherService {
 
     const updatedState = {
       ...currentState,
-      currentTime: newTime,
-      updatedAt: new Date()
+      playbackState: {
+        isPlaying: currentState?.playbackState?.isPlaying ?? false,
+        currentTime: newTime,
+        volume: currentState?.playbackState?.volume ?? 1
+      },
+      updatedAt: new Date(),
+      timestamp: Date.now()
     };
 
-    await setRoomState(roomId, updatedState);
+    await setRoomState({
+      roomId,
+      currentVideo: {
+        id: '',
+        title: '',
+        provider: '',
+        timestamp: Date.now(),
+        duration: 0
+      },
+      playbackState: updatedState,
+      lastUpdate: new Date()
+    });
     await setRoom(roomId, {
       ...room,
       currentState: updatedState,
@@ -785,11 +917,27 @@ export class WatchTogetherService {
     const currentState = await getRoomState(roomId);
     const updatedState = {
       ...currentState,
-      isPlaying: false,
-      updatedAt: new Date()
+      playbackState: {
+        isPlaying: false,
+        currentTime: currentState?.playbackState?.currentTime ?? 0,
+        volume: currentState?.playbackState?.volume ?? 1
+      },
+      updatedAt: new Date(),
+      timestamp: Date.now()
     };
 
-    await setRoomState(roomId, updatedState);
+    await setRoomState({
+      roomId,
+      currentVideo: {
+        id: '',
+        title: '',
+        provider: '',
+        timestamp: Date.now(),
+        duration: 0
+      },
+      playbackState: updatedState,
+      lastUpdate: new Date()
+    });
     await setRoom(roomId, {
       ...room,
       currentState: updatedState,
@@ -835,7 +983,7 @@ export class WatchTogetherService {
   }
 
   async setRoomState(roomId: string, state: any): Promise<void> {
-    await setRoomState(roomId, state);
+    await setRoomState(state);
   }
 
   async deleteRoom(roomId: string): Promise<void> {

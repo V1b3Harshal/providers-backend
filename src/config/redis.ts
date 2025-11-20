@@ -1,6 +1,7 @@
 // Enhanced Upstash Redis configuration with real Redis client
 import { env } from 'process';
 import { logger } from '../utils/logger';
+import { Room, RoomParticipant, RoomState } from '../types/index';
 
 // Check if Upstash is configured
 const isUpstashConfigured = env.UPSTASH_REDIS_REST_URL && env.UPSTASH_REDIS_REST_TOKEN;
@@ -58,7 +59,7 @@ class UpstashRedisClient {
 
   async get(key: string): Promise<any> {
     const result = await this.request(`get/${encodeURIComponent(key)}`);
-    return result.result || null;
+    return (result as any).result || null;
   }
 
   async del(key: string): Promise<any> {
@@ -77,10 +78,10 @@ class UpstashRedisClient {
     return await this.request(`ttl/${encodeURIComponent(key)}`);
   }
 
-  async zadd(key: string, score: number, member: string): Promise<any> {
+  async zadd(key: string, entries: Array<{ score: number; value: string }>): Promise<any> {
     return await this.request('zadd', 'POST', {
       key,
-      member: [{ score, member }]
+      member: entries.map(entry => ({ score: entry.score, member: entry.value }))
     });
   }
 
@@ -91,34 +92,15 @@ class UpstashRedisClient {
     });
   }
 
-  async zremrangebyscore(key: string, min: number, max: number): Promise<any> {
-    return await this.request('zremrangebyscore', 'POST', {
-      key,
-      min,
-      max
-    });
+  async zrange(key: string, min: number, max: number, options?: { REV?: boolean; WITHSCORES?: boolean }): Promise<any> {
+    const params = [encodeURIComponent(key), min, max];
+    if (options?.REV) params.push('REV');
+    if (options?.WITHSCORES) params.push('WITHSCORES');
+    return await this.request(`zrange/${params.join('/')}`);
   }
 
   async zcard(key: string): Promise<any> {
     return await this.request(`zcard/${encodeURIComponent(key)}`);
-  }
-
-  async sadd(key: string, members: string[]): Promise<any> {
-    return await this.request('sadd', 'POST', {
-      key,
-      members
-    });
-  }
-
-  async srem(key: string, member: string): Promise<any> {
-    return await this.request('srem', 'POST', {
-      key,
-      members: [member]
-    });
-  }
-
-  async smembers(key: string): Promise<any> {
-    return await this.request(`smembers/${encodeURIComponent(key)}`);
   }
 
   async hset(key: string, field: string, value: string): Promise<any> {
@@ -135,6 +117,13 @@ class UpstashRedisClient {
 
   async hgetall(key: string): Promise<any> {
     return await this.request(`hgetall/${encodeURIComponent(key)}`);
+  }
+
+  async hdel(key: string, field: string): Promise<any> {
+    return await this.request('hdel', 'POST', {
+      key,
+      fields: [field]
+    });
   }
 
   async ping(): Promise<any> {
@@ -159,9 +148,7 @@ class UpstashRedisClient {
 // Initialize Upstash Redis client
 export const connectToRedis = async (): Promise<void> => {
   if (!isUpstashConfigured) {
-    logger.warn('Upstash Redis configuration missing, using in-memory fallback');
-    isConnected = true;
-    return;
+    throw new Error('Upstash Redis configuration is required. Please set UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN');
   }
 
   try {
@@ -169,7 +156,7 @@ export const connectToRedis = async (): Promise<void> => {
       env.UPSTASH_REDIS_REST_URL!,
       env.UPSTASH_REDIS_REST_TOKEN!
     );
-    
+
     // Test connection
     await client.ping();
     redisClient = client;
@@ -177,166 +164,17 @@ export const connectToRedis = async (): Promise<void> => {
     logger.info('Connected to Upstash Redis successfully');
   } catch (error) {
     logger.error('Failed to connect to Upstash Redis:', error);
-    logger.warn('Using in-memory fallback');
-    isConnected = true; // Allow fallback to continue
+    throw new Error('Unable to connect to Upstash Redis');
   }
 };
 
 // Get Redis client
 export const getRedisClient = () => {
-  if (!isConnected) {
-    throw new Error('Redis not connected. Call connectToRedis() first.');
+  if (!isConnected || !redisClient) {
+    throw new Error('Upstash Redis not connected. Call connectToRedis() first.');
   }
-  
-  // If we have a real Upstash Redis client, use it
-  if (redisClient) {
-    return redisClient;
-  }
-  
-  // Fallback to in-memory implementation
-  const memoryStore = new Map<string, any>();
-  
-  return {
-    // Redis operations
-    set: async (key: string, value: string, options?: { EX?: number }) => {
-      memoryStore.set(key, value);
-      return { result: 'OK' };
-    },
 
-    get: async (key: string) => {
-      return { result: memoryStore.get(key) || null };
-    },
-
-    del: async (key: string) => {
-      const deleted = memoryStore.delete(key);
-      return { result: deleted ? 1 : 0 };
-    },
-
-    exists: async (key: string) => {
-      return { result: memoryStore.has(key) ? 1 : 0 };
-    },
-
-    expire: async (key: string, seconds: number) => {
-      // In-memory TTL simulation (basic implementation)
-      return { result: 1 };
-    },
-
-    ttl: async (key: string) => {
-      return { result: -1 }; // No TTL in memory store
-    },
-
-    // Set operations for rate limiting
-    zAdd: async (key: string, entries: Array<{ score: number; value: string }>) => {
-      if (!memoryStore.has(key)) {
-        memoryStore.set(key, new Map());
-      }
-      const zSet = memoryStore.get(key);
-      entries.forEach(entry => {
-        zSet.set(entry.value, entry.score);
-      });
-      return { result: entries.length };
-    },
-
-    zRemRangeByScore: async (key: string, min: number, max: number) => {
-      if (!memoryStore.has(key)) {
-        return { result: 0 };
-      }
-      const zSet = memoryStore.get(key);
-      let removed = 0;
-      for (const [value, score] of zSet) {
-        if (score >= min && score <= max) {
-          zSet.delete(value);
-          removed++;
-        }
-      }
-      return { result: removed };
-    },
-
-    zCard: async (key: string) => {
-      if (!memoryStore.has(key)) {
-        return { result: 0 };
-      }
-      return { result: memoryStore.get(key).size };
-    },
-
-    // Set operations
-    sAdd: async (key: string, members: string[]) => {
-      if (!memoryStore.has(key)) {
-        memoryStore.set(key, new Set());
-      }
-      const set = memoryStore.get(key);
-      let added = 0;
-      members.forEach(member => {
-        if (!set.has(member)) {
-          set.add(member);
-          added++;
-        }
-      });
-      return { result: added };
-    },
-
-    sRem: async (key: string, member: string) => {
-      if (!memoryStore.has(key)) {
-        return { result: 0 };
-      }
-      const set = memoryStore.get(key);
-      const deleted = set.delete(member);
-      return { result: deleted ? 1 : 0 };
-    },
-
-    sMembers: async (key: string) => {
-      if (!memoryStore.has(key)) {
-        return { result: [] };
-      }
-      const set = memoryStore.get(key);
-      return { result: Array.from(set) };
-    },
-
-    // Hash operations
-    hGetAll: async (key: string) => {
-      if (!memoryStore.has(key)) {
-        return { result: {} };
-      }
-      return { result: Object.fromEntries(memoryStore.get(key)) };
-    },
-
-    hSet: async (key: string, field: string, value: string) => {
-      if (!memoryStore.has(key)) {
-        memoryStore.set(key, new Map());
-      }
-      const hash = memoryStore.get(key);
-      hash.set(field, value);
-      return { result: 1 };
-    },
-
-    hGet: async (key: string, field: string) => {
-      if (!memoryStore.has(key)) {
-        return { result: null };
-      }
-      const hash = memoryStore.get(key);
-      return { result: hash.get(field) || null };
-    },
-
-    // Multi operations
-    multi: () => {
-      return {
-        exec: async () => {
-          return [];
-        }
-      };
-    },
-
-    // Health check
-    ping: async () => {
-      return { result: 'PONG' };
-    },
-
-    // Utility methods
-    isRedisConnected: () => isConnected,
-    getRedisUrl: () => env.UPSTASH_REDIS_REST_URL || 'in-memory',
-    getRedisToken: () => env.UPSTASH_REDIS_REST_TOKEN || '',
-    isRealRedis: () => !!redisClient
-  };
+  return redisClient;
 };
 
 // Check if Redis is connected
@@ -345,43 +183,37 @@ export const isRedisConnected = () => isConnected;
 // Check Redis health
 export const getRedisHealth = async (): Promise<{ status: string; responseTime: number; type: string }> => {
   const start = Date.now();
-  
-  if (redisClient) {
-    try {
-      const health = await redisClient.health();
-      return { 
-        status: health.status, 
-        responseTime: health.responseTime, 
-        type: 'upstash-redis' 
-      };
-    } catch (error) {
-      return { 
-        status: 'unhealthy', 
-        responseTime: Date.now() - start, 
-        type: 'upstash-redis' 
-      };
-    }
+
+  if (!redisClient) {
+    return {
+      status: 'not_connected',
+      responseTime: Date.now() - start,
+      type: 'upstash-redis'
+    };
   }
-  
-  return { 
-    status: 'healthy', 
-    responseTime: Date.now() - start, 
-    type: 'in-memory' 
-  };
+
+  try {
+    const health = await redisClient.health();
+    return {
+      status: health.status,
+      responseTime: health.responseTime,
+      type: 'upstash-redis'
+    };
+  } catch (error) {
+    return {
+      status: 'unhealthy',
+      responseTime: Date.now() - start,
+      type: 'upstash-redis'
+    };
+  }
 };
 
 // Cleanup expired keys
 export const cleanupExpiredKeys = async (): Promise<void> => {
   if (!isConnected) return;
-  
+
   try {
-    if (redisClient) {
-      // Upstash handles TTL automatically, but we can add custom cleanup logic
-      logger.info('Redis cleanup completed (Upstash handles TTL automatically)');
-    } else {
-      // In-memory cleanup
-      logger.info('In-memory Redis cleanup completed');
-    }
+    logger.info('Redis cleanup completed (Upstash handles TTL automatically)');
   } catch (error) {
     logger.error('Error during Redis cleanup:', error);
   }
@@ -394,20 +226,280 @@ export const RedisKeys = {
   roomParticipants: 'room:participants:',
   roomState: 'room:state:',
   activeRooms: 'rooms:active',
-   
+  
   // Provider caching
   providerCache: 'provider:',
   providerHealth: 'provider:health:',
-   
+  
   // Rate limiting
   rateLimit: 'rate_limit:',
-   
+  
   // Sessions
   sessions: 'session:',
-   
+  
   // Cache
   cache: 'cache:',
   metrics: 'metrics:',
   userData: 'user:',
   watchParty: 'watch_party:'
+};
+
+// =================================================================
+// WATCH TOGETHER ROOM MANAGEMENT FUNCTIONS
+// =================================================================
+
+// Get room data
+export const getRoom = async (roomId: string): Promise<Room | null> => {
+  const client = getRedisClient();
+  const key = `${RedisKeys.rooms}${roomId}`;
+  const result = await client.get(key);
+  if (!result?.result) return null;
+  
+  try {
+    const roomData = JSON.parse(result.result);
+    return {
+      ...roomData,
+      createdAt: new Date(roomData.createdAt),
+      updatedAt: new Date(roomData.updatedAt),
+      expiresAt: new Date(roomData.expiresAt)
+    };
+  } catch {
+    return null;
+  }
+};
+
+// Set room data
+export const setRoom = async (roomIdOrRoom: string | Room, room?: Room): Promise<void> => {
+  const client = getRedisClient();
+  
+  // Handle both function signatures
+  let roomData: Room;
+  let roomId: string;
+  
+  if (typeof roomIdOrRoom === 'string') {
+    roomData = room!;
+    roomId = roomIdOrRoom;
+  } else {
+    roomData = roomIdOrRoom;
+    roomId = roomIdOrRoom.id;
+  }
+  
+  const key = `${RedisKeys.rooms}${roomId}`;
+  const ttl = Math.max(0, Math.floor((roomData.expiresAt.getTime() - Date.now()) / 1000));
+  
+  await client.set(key, JSON.stringify(roomData), { EX: ttl });
+};
+
+// Delete room data
+export const deleteRoom = async (roomId: string): Promise<void> => {
+  const client = getRedisClient();
+  const key = `${RedisKeys.rooms}${roomId}`;
+  await client.del(key);
+  
+  // Also remove from active rooms
+  await removeRoomFromActiveRooms(roomId);
+};
+
+// Add room participant
+export const addRoomParticipant = async (roomId: string, participant: RoomParticipant | string): Promise<void> => {
+  const client = getRedisClient();
+  const key = `${RedisKeys.roomParticipants}${roomId}`;
+  
+  if (typeof participant === 'string') {
+    // Handle string userId by creating a basic participant
+    const basicParticipant: RoomParticipant = {
+      userId: participant,
+      roomId,
+      isHost: false,
+      isOnline: true,
+      joinedAt: new Date(),
+      lastActivity: new Date()
+    };
+    await client.hset(key, participant, JSON.stringify({
+      ...basicParticipant,
+      joinedAt: basicParticipant.joinedAt.toISOString(),
+      lastActivity: basicParticipant.lastActivity.toISOString()
+    }));
+  } else {
+    await client.hset(key, participant.userId, JSON.stringify({
+      ...participant,
+      joinedAt: participant.joinedAt.toISOString(),
+      lastActivity: participant.lastActivity.toISOString()
+    }));
+  }
+  
+  // Set TTL for participant data
+  await client.expire(key, 3600); // 1 hour
+};
+
+// Remove room participant
+export const removeRoomParticipant = async (roomId: string, userId: string): Promise<void> => {
+  const client = getRedisClient();
+  const key = `${RedisKeys.roomParticipants}${roomId}`;
+  await client.hdel(key, userId);
+};
+
+// Get room participants
+export const getRoomParticipants = async (roomId: string): Promise<RoomParticipant[]> => {
+  const client = getRedisClient();
+  const key = `${RedisKeys.roomParticipants}${roomId}`;
+  const result = await client.hgetall(key);
+  
+  if (!result?.result) return [];
+  
+  return Object.entries(result.result).map(([userId, data]) => {
+    const participantData = JSON.parse(data as string);
+    return {
+      userId,
+      roomId,
+      isHost: participantData.isHost,
+      isOnline: participantData.isOnline,
+      deviceInfo: participantData.deviceInfo,
+      joinedAt: new Date(participantData.joinedAt),
+      lastActivity: new Date(participantData.lastActivity)
+    };
+  });
+};
+
+// Set room state
+export const setRoomState = async (roomState: RoomState | { roomId: string; currentVideo: any; playbackState: any; currentTime?: number; lastUpdate: Date }): Promise<void> => {
+  const client = getRedisClient();
+  const roomId = typeof roomState === 'string' ? roomState : roomState.roomId;
+  const key = `${RedisKeys.roomState}${roomId}`;
+  
+  const stateData = typeof roomState === 'string' ? { 
+    roomId, 
+    currentVideo: { id: '', title: '', provider: '', timestamp: 0, duration: 0 },
+    playbackState: { isPlaying: false, currentTime: 0, volume: 1 },
+    lastUpdate: new Date()
+  } : {
+    ...roomState,
+    lastUpdate: roomState.lastUpdate.toISOString()
+  };
+  
+  await client.set(key, JSON.stringify(stateData));
+  
+  // Set TTL
+  await client.expire(key, 3600); // 1 hour
+};
+
+// Get room state
+export const getRoomState = async (roomId: string): Promise<RoomState | null> => {
+  const client = getRedisClient();
+  const key = `${RedisKeys.roomState}${roomId}`;
+  const result = await client.get(key);
+  
+  if (!result?.result) return null;
+  
+  try {
+    const stateData = JSON.parse(result.result);
+    return {
+      ...stateData,
+      lastUpdate: new Date(stateData.lastUpdate)
+    };
+  } catch {
+    return null;
+  }
+};
+
+// Get active rooms
+export const getActiveRooms = async (): Promise<string[]> => {
+  const client = getRedisClient();
+  const key = RedisKeys.activeRooms;
+  const result = await client.zrange(key, 0, -1, { REV: true, WITHSCORES: false });
+  
+  return (result as any)?.result || [];
+};
+
+// Add room to active rooms
+export const addRoomToActiveRooms = async (roomId: string): Promise<void> => {
+  const client = getRedisClient();
+  const key = RedisKeys.activeRooms;
+  const score = Date.now();
+
+  await client.zadd(key, [{ score, value: roomId }]);
+};
+
+// Remove room from active rooms
+export const removeRoomFromActiveRooms = async (roomId: string): Promise<void> => {
+  const client = getRedisClient();
+  const key = RedisKeys.activeRooms;
+  await client.zrem(key, roomId);
+};
+
+// Renew room TTL
+export const renewRoomTTL = async (roomId: string, newExpiryTime?: Date): Promise<void> => {
+  const client = getRedisClient();
+  const key = `${RedisKeys.rooms}${roomId}`;
+  
+  const ttl = newExpiryTime ? 
+    Math.max(0, Math.floor((newExpiryTime.getTime() - Date.now()) / 1000)) :
+    3600; // Default 1 hour
+  
+  await client.expire(key, ttl);
+};
+
+// Batch renew room TTLs
+export const batchRenewRoomTTLs = async (rooms: Array<{ id: string; expiresAt: Date }>, ttl?: number): Promise<void> => {
+  for (const room of rooms) {
+    if (ttl) {
+      await renewRoomTTL(room.id, new Date(Date.now() + ttl * 1000));
+    } else {
+      await renewRoomTTL(room.id, room.expiresAt);
+    }
+  }
+};
+
+// Cleanup inactive rooms
+export const cleanupInactiveRooms = async (): Promise<{ cleaned: number }> => {
+  const client = getRedisClient();
+  const activeRooms = await getActiveRooms();
+  
+  let cleaned = 0;
+  const cutoffTime = Date.now() - (2 * 60 * 60 * 1000); // 2 hours ago
+  
+  for (const roomId of activeRooms) {
+    const room = await getRoom(roomId);
+    if (room && room.updatedAt.getTime() < cutoffTime) {
+      await deleteRoom(roomId);
+      cleaned++;
+    }
+  }
+  
+  return { cleaned };
+};
+
+// Get rooms with pagination
+export const getRoomsWithPagination = async (page: number, limit: number): Promise<{
+  rooms: Room[];
+  total: number;
+  hasNext: boolean;
+  hasPrevious: boolean;
+}> => {
+  const client = getRedisClient();
+  const activeRooms = await getActiveRooms();
+  
+  // Get room details
+  const rooms: Room[] = [];
+  for (const roomId of activeRooms) {
+    const room = await getRoom(roomId);
+    if (room) {
+      rooms.push(room);
+    }
+  }
+  
+  // Sort by creation date (newest first)
+  rooms.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+  
+  // Paginate
+  const start = (page - 1) * limit;
+  const end = start + limit;
+  const paginatedRooms = rooms.slice(start, end);
+  
+  return {
+    rooms: paginatedRooms,
+    total: rooms.length,
+    hasNext: end < rooms.length,
+    hasPrevious: page > 1
+  };
 };

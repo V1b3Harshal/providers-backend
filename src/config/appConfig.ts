@@ -32,10 +32,31 @@ export const getAppConfig = (): AppConfig => {
   const port = parseInt(env.PORT || '3001');
   const host = '0.0.0.0';
   
-  // CORS configuration
-  const corsOrigin = env.NODE_ENV === 'production'
-    ? (env.CORS_ORIGIN?.split(',').filter(Boolean) || [env.RAILWAY_PUBLIC_DOMAIN || 'localhost:3001'])
-    : env.FRONTEND_URL || 'http://localhost:3000';
+  // CORS configuration - Secure defaults
+  let corsOrigin: string | string[];
+
+  if (env.NODE_ENV === 'production') {
+    // Production: Use specific allowed origins or Railway domain
+    if (env.CORS_ORIGIN && env.CORS_ORIGIN !== '*') {
+      corsOrigin = env.CORS_ORIGIN.split(',').map(origin => origin.trim()).filter(Boolean);
+    } else {
+      // Fallback to Railway domain only (never use wildcard)
+      corsOrigin = env.RAILWAY_PUBLIC_DOMAIN ? [env.RAILWAY_PUBLIC_DOMAIN] : ['localhost:3001'];
+    }
+  } else {
+    // Development: Allow localhost variations for development
+    corsOrigin = [
+      'http://localhost:3000',
+      'http://127.0.0.1:3000',
+      'http://localhost:3001',
+      'http://127.0.0.1:3001'
+    ];
+
+    // Add custom frontend URL if specified
+    if (env.FRONTEND_URL && !corsOrigin.includes(env.FRONTEND_URL)) {
+      corsOrigin.push(env.FRONTEND_URL);
+    }
+  }
 
   return {
     port,
@@ -43,8 +64,14 @@ export const getAppConfig = (): AppConfig => {
     cors: {
       origin: corsOrigin,
       credentials: true,
-      methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-      allowedHeaders: ['Content-Type', 'Authorization', 'x-internal-key', 'x-csrf-token'],
+      methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+      allowedHeaders: [
+        'Content-Type',
+        'Authorization',
+        'x-internal-key',
+        'x-csrf-token',
+        'x-requested-with'
+      ],
     },
     security: {
       helmet: {

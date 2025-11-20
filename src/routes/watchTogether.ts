@@ -3,13 +3,13 @@ import { watchTogetherService } from '../services/watchTogetherService';
 import { sanitizeRoomData, sanitizePlaybackAction, sanitizeUserId } from '../utils/sanitizer';
 import { createSafeErrorResponse, logErrorWithDetails } from '../utils/errorHandler';
 import { logger } from '../utils/logger';
-import { userAuth } from '../middleware/userAuth';
+import { supabaseAuth } from '../middleware/supabaseAuth';
 
 const watchTogetherRoutes: FastifyPluginAsync = async (fastify) => {
   const io = (fastify as any).io;
   const wtService = watchTogetherService(io);
-  // Apply user authentication to all watch together routes
-  fastify.addHook('onRequest', userAuth);
+  // Apply Supabase authentication to all watch together routes
+  fastify.addHook('onRequest', supabaseAuth);
 
   // Create a new watch-together room
   fastify.post('/rooms', {
@@ -1236,9 +1236,7 @@ const watchTogetherRoutes: FastifyPluginAsync = async (fastify) => {
       // Update room settings
       if (isPublic !== undefined) {
         room.isPublic = isPublic;
-        room.shareableLink = isPublic ?
-          `${process.env.FRONTEND_URL || 'http://localhost:3000'}/watch-together/${roomId}` :
-          null;
+        room.shareableLink = isPublic ? `${process.env.FRONTEND_URL || 'http://localhost:3000'}/watch-together/${roomId}` : '';
       }
       
       if (maxParticipants !== undefined) {
